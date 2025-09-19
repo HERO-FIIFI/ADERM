@@ -1,0 +1,184 @@
+// email-helpers.tsx - FIXED VERSION
+import { 
+  sendNewRequestEmail, 
+  sendStatusChangeEmail, 
+  sendWelcomeEmail, 
+  sendOTPEmail,
+  sendPasswordResetEmail,            // ⬅️ add this
+  sendPasswordResetConfirmationEmail,
+  sendEmailViaSupabase,
+  type RequestEmailData,
+  type StatusChangeEmailData,
+  type AuthEmailData 
+} from './email'; 
+
+
+interface RequestData {
+  id: string;
+  title: string;
+  assigned_to: string;
+  created_by: string;
+  assigned_to_email: string;
+  due_date: string;
+  status: string;
+  department?: string;
+}
+
+interface UserData {
+  id: string | null;
+  email: string;
+  name?: string;
+  role?: string;
+}
+
+interface EmailResponse {
+  success: boolean;
+  error?: string;
+}
+
+// Helper to get environment variables for Deno
+const getEnv = (key: string, defaultValue: string = ""): string => {
+  return Deno.env.get(key) || defaultValue;
+};
+
+const APP_URL = getEnv("NEXT_PUBLIC_APP_URL");
+
+// Standardized error logging
+const logError = (context: string, error: unknown): void => {
+  const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+  console.error(`[Email] Error in ${context}:`, errorMessage);
+};
+
+// Updated sendEmailViaSupabase wrapper to return correct format
+const sendEmailWrapper = async (
+  to: string[], 
+  subject: string, 
+  html: string, 
+  cc?: string[]
+): Promise<EmailResponse> => {
+  try {
+    console.log(`[DEBUG] sendEmailWrapper called with: to=${to}, subject=${subject}`);
+    const success = await sendEmailViaSupabase(to, subject, html, cc);
+    console.log(`[DEBUG] sendEmailViaSupabase returned: ${success}`);
+    
+    if (success) {
+      return { success: true };
+    } else {
+      return { success: false, error: "Email sending failed" };
+    }
+  } catch (error) {
+    logError('sendEmailWrapper', error);
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    };
+  }
+};
+
+export const triggerNewRequestEmail = async (
+  request: RequestData,
+  auditee: UserData,
+  auditor: UserData,
+  manager?: UserData | null
+): Promise<EmailResponse> => {
+  try {
+    const emailData: RequestEmailData = {
+      requestId: request.id,
+      requestTitle: request.title,
+      auditeeName: auditee.name || auditee.email.split('@')[0],
+      auditeeEmail: auditee.email,
+      managerName: manager?.name,
+      managerEmail: manager?.email,
+      auditorName: auditor.name || auditor.email.split('@')[0],
+      auditorEmail: auditor.email,
+      dueDate: new Date(request.due_date).toLocaleDateString(),
+      requestUrl: `${APP_URL}/requests/${request.id}`,
+    };
+
+    const success = await sendNewRequestEmail(emailData);
+    return { success };
+  } catch (error) {
+    logError('triggerNewRequestEmail', error);
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+  }
+};
+
+export const triggerStatusChangeEmail = async (
+  request: RequestData,
+  auditee: UserData,
+  auditor: UserData,
+  manager?: UserData | null
+): Promise<EmailResponse> => {
+  try {
+    const emailData: StatusChangeEmailData = {
+      requestId: request.id,
+      requestTitle: request.title,
+      auditeeName: auditee.name || auditee.email.split('@')[0],
+      auditeeEmail: auditee.email,
+      managerName: manager?.name,
+      managerEmail: manager?.email,
+      auditorName: auditor.name || auditor.email.split('@')[0],
+      auditorEmail: auditor.email,
+      dueDate: new Date(request.due_date).toLocaleDateString(),
+      requestUrl: `${APP_URL}/requests/${request.id}`,
+      previousStatus: request.status, // You might need to pass this separately
+      newStatus: request.status,
+    };
+
+    const success = await sendStatusChangeEmail(emailData);
+    return { success };
+  } catch (error) {
+    logError('triggerStatusChangeEmail', error);
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+  }
+};
+
+export const triggerWelcomeEmail = async (
+  user: UserData
+): Promise<EmailResponse> => {
+  try {
+    const emailData: AuthEmailData = {
+      userName: user.name || user.email.split('@')[0],
+      userEmail: user.email,
+    };
+
+    const success = await sendWelcomeEmail(emailData);
+    return { success };
+  } catch (error) {
+    logError('triggerWelcomeEmail', error);
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+  }
+};
+
+export const triggerOTPEmail = async (
+  user: UserData,
+  otpCode: string
+): Promise<EmailResponse> => {
+  try {
+    const emailData: AuthEmailData = {
+      userName: user.name || user.email.split('@')[0],
+      userEmail: user.email,
+      otpCode,
+    };
+
+    const success = await sendOTPEmail(emailData);
+    return { success };
+  } catch (error) {
+    logError('triggerOTPEmail', error);
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+  }
+};
+
+export const triggerResetPasswordEmail = async (
+  email: string,
+  resetLink: string
+): Promise<EmailResponse> => {
+  try {
+    const subject = "ADERM - Password Reset Request";
+    const html = `...long inline HTML...`;
+    return await sendEmailWrapper([email], subject, html);
+  } catch (error) {
+    logError('triggerResetPasswordEmail', error);
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+  }
+};
