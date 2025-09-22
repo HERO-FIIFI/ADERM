@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from './utils/supabase/client';
 import { projectId, publicAnonKey } from './utils/supabase/info';
-import { Login } from './components/auth/Login';
+import  Login from './components/auth/Login';
 import { Signup } from './components/auth/Signup';
 import { AuditeeOtpSignup } from './components/auth/AuditeeOtpSignup';
 import { AuditorDashboard } from './components/dashboard/AuditorDashboard';
