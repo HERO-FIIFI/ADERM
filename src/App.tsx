@@ -3,7 +3,6 @@ import { supabase } from './utils/supabase/client';
 import { projectId, publicAnonKey } from './utils/supabase/info';
 import { Login } from './components/auth/Login';
 import { Signup } from './components/auth/Signup';
-import { PasswordReset } from './components/auth/PasswordReset';
 import { AuditeeOtpSignup } from './components/auth/AuditeeOtpSignup';
 import { AuditorDashboard } from './components/dashboard/AuditorDashboard';
 import { AuditeeDashboard } from './components/dashboard/AuditeeDashboard';
@@ -27,10 +26,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [authMode, setAuthMode] = useState<'login' | 'signup' | 'auditee-signup'>('login');
   
-  // Check if this is a password reset flow
-  const isPasswordReset = window.location.pathname === '/reset-password' || 
-                          window.location.hash.includes('type=recovery') ||
-                          window.location.search.includes('type=recovery');
+
 
   // Check URL parameters for auditee signup
   const urlParams = new URLSearchParams(window.location.search);
@@ -155,10 +151,7 @@ export default function App() {
     );
   }
 
-  // Handle password reset flow
-  if (isPasswordReset) {
-    return <PasswordReset />;
-  }
+  
 
   if (!user) {
     return (
