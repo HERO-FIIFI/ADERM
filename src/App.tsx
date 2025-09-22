@@ -14,8 +14,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
 import { Shield, FileText, Users } from 'lucide-react';
 import { Toaster } from './components/ui/sonner';
 
-
-
 interface User {
   id: string;
   email: string;
@@ -48,39 +46,46 @@ export default function App() {
 
   useEffect(() => {
     checkUser();
-    
-    // Listen for auth state changes (including password recovery)
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        if (event === 'SIGNED_IN' && session?.access_token) {
-          await fetchUserProfile(session.access_token);
-        } else if (event === 'SIGNED_OUT') {
-          setUser(null);
-          setAccessToken(null);
-        } else if (event === 'PASSWORD_RECOVERY') {
-          // User clicked on password reset email link
-          console.log('Password recovery event detected');
-        }
-      }
-    );
-
-    return () => subscription.unsubscribe();
   }, []);
 
   const checkUser = async () => {
     try {
+      // Check for custom OTP session first
+      const storedSession = localStorage.getItem('aderm_session');
+      if (storedSession) {
+        const sessionData = JSON.parse(storedSession);
+        const { token, user: storedUser, issued_at } = sessionData;
+        
+        // Check if session is still valid (e.g., 1 hour expiry)
+        const sessionAge = Date.now() - issued_at;
+        const SESSION_DURATION = 60 * 60 * 1000; // 1 hour
+        
+        if (sessionAge < SESSION_DURATION) {
+          // Try to fetch fresh profile with stored token
+          const success = await fetchUserProfile(token);
+          if (success) {
+            return; // Successfully loaded user from custom session
+          }
+        } else {
+          // Session expired, remove it
+          localStorage.removeItem('aderm_session');
+        }
+      }
+
+      // Fallback to Supabase auth (for backward compatibility)
       const { data: { session }, error } = await supabase.auth.getSession();
       if (session?.access_token) {
         await fetchUserProfile(session.access_token);
       }
     } catch (error) {
       console.error('Error checking user session:', error);
+      localStorage.removeItem('aderm_session'); // Clean up on error
     } finally {
       setLoading(false);
     }
   };
 
-  const fetchUserProfile = async (token: string) => {
+  const fetchUserProfile = async (token: string): Promise<boolean> => {
     try {
       const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37/profile`, {
         headers: {
@@ -93,88 +98,48 @@ export default function App() {
         const data = await response.json();
         setUser(data.user);
         setAccessToken(token);
+        return true;
       } else {
         console.error('Failed to fetch user profile');
         setUser(null);
         setAccessToken(null);
+        // Clean up invalid session
+        localStorage.removeItem('aderm_session');
+        return false;
       }
     } catch (error) {
       console.error('Error fetching user profile:', error);
       setUser(null);
       setAccessToken(null);
+      localStorage.removeItem('aderm_session');
+      return false;
     }
   };
-
-  const handleLogin = async (email: string, password: string) => {
-    try {
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
-
-      if (error) {
-        throw error;
-      }
-
-      if (data.session?.access_token) {
-        await fetchUserProfile(data.session.access_token);
-        return { success: true };
-      }
-    } catch (error: any) {
-      console.error('Login error:', error);
-      return { success: false, error: error.message };
-    }
-  };
-
-
 
   const handleAuditeeSignupComplete = async (userProfile: User) => {
     // Clear URL parameters
     window.history.replaceState({}, document.title, window.location.pathname);
     
-    // For auditee OTP signup, we need to get a session
-    try {
-      const { data: { session }, error } = await supabase.auth.getSession();
-      if (session?.access_token) {
-        setUser(userProfile);
-        setAccessToken(session.access_token);
-      } else {
-        console.error('No session after OTP signup');
-        // Redirect to login
-        setAuthMode('login');
-      }
-    } catch (error) {
-      console.error('Error getting session after OTP signup:', error);
+    // For OTP signup, the user should already be logged in via the OTP session
+    // Just check if we have a valid session
+    const storedSession = localStorage.getItem('aderm_session');
+    if (storedSession) {
+      const sessionData = JSON.parse(storedSession);
+      setUser(userProfile);
+      setAccessToken(sessionData.token);
+    } else {
+      console.error('No session after OTP signup');
       setAuthMode('login');
     }
   };
 
-  const handleSignup = async (email: string, password: string, name: string, role: string) => {
-    try {
-      const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37/signup`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${publicAnonKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ email, password, name, role })
-      });
-
-      const data = await response.json();
-
-      if (response.ok) {
-        return { success: true };
-      } else {
-        return { success: false, error: data.error };
-      }
-    } catch (error: any) {
-      console.error('Signup error:', error);
-      return { success: false, error: error.message };
-    }
-  };
-
   const handleLogout = async () => {
+    // Clear custom session
+    localStorage.removeItem('aderm_session');
+    
+    // Also clear Supabase auth (if any)
     await supabase.auth.signOut();
+    
     setUser(null);
     setAccessToken(null);
   };
@@ -258,10 +223,10 @@ export default function App() {
                   <TabsTrigger value="signup">Sign Up</TabsTrigger>
                 </TabsList>
                 <TabsContent value="login">
-                  <Login onLogin={handleLogin} />
+                  <Login />
                 </TabsContent>
                 <TabsContent value="signup">
-                  <Signup onSignup={handleSignup} />
+                  <Signup />
                 </TabsContent>
               </Tabs>
             )}
