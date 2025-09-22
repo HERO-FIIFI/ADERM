@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
@@ -10,173 +10,153 @@ import { UserPlus, Mail, Shield } from 'lucide-react';
 import { toast } from 'sonner@2.0.3';
 import { projectId, publicAnonKey } from '../../utils/supabase/info';
 
+type Step = 'form' | 'otp';
+
 interface SignupProps {
-  onSignup: (email: string, password: string, name: string, role: string) => Promise<{ success: boolean; error?: string }>;
+  // kept for backward-compat; not used in OTP flow
+  onSignup?: (email: string, password: string, name: string, role: string) => Promise<{ success: boolean; error?: string }>;
 }
 
-export function Signup({ onSignup }: SignupProps) {
+export function Signup(_props: SignupProps) {
+  const [step, setStep] = useState<Step>('form');
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
   const [name, setName] = useState('');
-  const [role, setRole] = useState('');
+  const [role, setRole] = useState<string>('');
   const [otp, setOtp] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [useOtpVerification, setUseOtpVerification] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
   const [otpSent, setOtpSent] = useState(false);
+  const [resendCountdown, setResendCountdown] = useState(0); // seconds
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
+  const baseUrl = useMemo(
+    () => `https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37`,
+    []
+  );
+  const ecobankRegex = /^[^\s@]+@ecobank\.com$/i;
 
-    if (!email || !name || !role) {
-      setError('Please fill in all required fields');
-      setLoading(false);
+  useEffect(() => {
+    if (resendCountdown <= 0) return;
+    const t = setInterval(() => setResendCountdown((s) => s - 1), 1000);
+    return () => clearInterval(t);
+  }, [resendCountdown]);
+
+  async function sendSignupOtp() {
+    setErr(null);
+    setInfo(null);
+
+    const emailTrim = email.trim();
+    const nameTrim = name.trim();
+
+    if (!emailTrim || !nameTrim || !role) {
+      setErr('Please fill in email, full name, and role.');
       return;
     }
-
-    // Validate @ecobank.com email domain
-    const ecobankEmailRegex = /^[^\s@]+@ecobank\.com$/;
-    if (!ecobankEmailRegex.test(email)) {
-      setError('Please use your Ecobank email address (@ecobank.com)');
-      setLoading(false);
+    if (!ecobankRegex.test(emailTrim)) {
+      setErr('Please use your Ecobank email address (@ecobank.com).');
       return;
     }
-
-    if (useOtpVerification) {
-      // OTP verification flow
-      if (!otpSent) {
-        // Send OTP for verification
-        try {
-          const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37/send-otp`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${publicAnonKey}`,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ email })
-          });
-
-          const data = await response.json();
-
-          if (response.ok) {
-            setOtpSent(true);
-            toast.success('OTP sent to your email for verification');
-          } else {
-            setError(data.error || 'Failed to send OTP');
-          }
-        } catch (error: any) {
-          console.error('Error sending OTP:', error);
-          setError('Failed to send OTP. Please try again.');
-        }
-      } else {
-        // Verify OTP and create account
-        if (otp.length !== 6) {
-          setError('Please enter the complete 6-digit OTP');
-          setLoading(false);
-          return;
-        }
-
-        // For OTP signup of managers/auditors, we'll use a different approach
-        // First verify the OTP, then create the account with password
-        try {
-          const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37/verify-otp-signup`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${publicAnonKey}`,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ 
-              email, 
-              otp, 
-              name,
-              role // This will override the auditee role in the server for manager/auditor
-            })
-          });
-
-          const data = await response.json();
-
-          if (response.ok) {
-            toast.success('Account created successfully! Please log in.');
-            resetForm();
-          } else {
-            setError(data.error || 'Failed to verify OTP and create account');
-          }
-        } catch (error: any) {
-          console.error('Error verifying OTP for signup:', error);
-          setError('Failed to verify OTP. Please try again.');
-        }
-      }
-    } else {
-      // Regular password signup
-      if (!password) {
-        setError('Please enter a password');
-        setLoading(false);
-        return;
-      }
-
-      if (password.length < 6) {
-        setError('Password must be at least 6 characters long');
-        setLoading(false);
-        return;
-      }
-
-      const result = await onSignup(email, password, name, role);
-      
-      if (result.success) {
-        toast.success('Account created successfully! Please log in.');
-        resetForm();
-      } else {
-        setError(result.error || 'Signup failed');
-      }
-    }
-    
-    setLoading(false);
-  };
-
-  const resetForm = () => {
-    setEmail('');
-    setPassword('');
-    setName('');
-    setRole('');
-    setOtp('');
-    setOtpSent(false);
-    setUseOtpVerification(false);
-  };
-
-  const handleResendOtp = async () => {
-    setLoading(true);
-    setError('');
 
     try {
-      const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37/send-otp`, {
+      setLoading(true);
+      // send OTP for signup
+      const resp = await fetch(`${baseUrl}/send-signup-otp`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${publicAnonKey}`,
-          'Content-Type': 'application/json'
+          Authorization: `Bearer ${publicAnonKey}`,
+          'Content-Type': 'application/json',
+          origin: window.location.origin,
         },
-        body: JSON.stringify({ email })
+        // backend only needs email to send OTP
+        body: JSON.stringify({ email: emailTrim.toLowerCase() }),
       });
 
-      const data = await response.json();
+      const data = await safeJson(resp);
 
-      if (response.ok) {
-        toast.success('New OTP sent to your email');
-        setOtp('');
-      } else {
-        setError(data.error || 'Failed to resend OTP');
+      if (!resp.ok) {
+        setErr(data?.error || 'Failed to send verification code.');
+        return;
       }
-    } catch (error: any) {
-      console.error('Error resending OTP:', error);
-      setError('Failed to resend OTP. Please try again.');
+
+      setOtpSent(true);
+      setStep('otp');
+      setInfo(`We sent a 6-digit code to ${emailTrim}.`);
+      setResendCountdown(60);
+      toast.success('OTP sent to your email.');
+    } catch (e: any) {
+      console.error('send-signup-otp error:', e);
+      setErr('Failed to send verification code.');
     } finally {
       setLoading(false);
     }
-  };
+  }
+
+  async function verifyAndCreate() {
+    setErr(null);
+    setInfo(null);
+
+    const emailTrim = email.trim().toLowerCase();
+    const nameTrim = name.trim();
+    const code = otp.trim();
+
+    if (!emailTrim || !nameTrim || !role) {
+      setErr('Please fill in email, full name, and role.');
+      return;
+    }
+    if (!ecobankRegex.test(emailTrim)) {
+      setErr('Please use your Ecobank email address (@ecobank.com).');
+      return;
+    }
+    if (code.length !== 6 || !/^\d{6}$/.test(code)) {
+      setErr('Code must be 6 digits.');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const resp = await fetch(`${baseUrl}/verify-otp-signup`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${publicAnonKey}`,
+          'Content-Type': 'application/json',
+          origin: window.location.origin,
+        },
+        body: JSON.stringify({
+          email: emailTrim,
+          otp: code,
+          name: nameTrim,
+          role, // 'auditor' | 'auditee' | 'manager'
+        }),
+      });
+
+      const data = await safeJson(resp);
+
+      if (!resp.ok) {
+        setErr(data?.error || 'Failed to verify OTP and create account.');
+        return;
+      }
+
+      toast.success('Account created successfully! You can log in now.');
+      // You can route by role if desired:
+      // if (role === 'auditee') window.location.href = '/auditee';
+      // else window.location.href = '/login';
+      window.location.href = '/login';
+    } catch (e: any) {
+      console.error('verify-otp-signup error:', e);
+      setErr('Failed to verify code.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function resendOtp() {
+    if (resendCountdown > 0 || loading) return;
+    // just call sendSignupOtp again; keep name/role as-is
+    await sendSignupOtp();
+  }
 
   return (
-    <Card>
+    <Card className="w-full max-w-md mx-auto">
       <CardHeader>
         <CardTitle className="flex items-center">
           <UserPlus className="h-5 w-5 mr-2" />
@@ -184,113 +164,82 @@ export function Signup({ onSignup }: SignupProps) {
         </CardTitle>
       </CardHeader>
       <CardContent>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {error && (
-            <Alert variant="destructive">
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
+        {err && (
+          <Alert variant="destructive" className="mb-4">
+            <AlertDescription>{err}</AlertDescription>
+          </Alert>
+        )}
+        {info && (
+          <Alert className="mb-4">
+            <AlertDescription>{info}</AlertDescription>
+          </Alert>
+        )}
 
-          {/* Verification Method Selection (only show if not sent OTP yet) */}
-          {!otpSent && (
+        {step === 'form' && (
+          <div className="space-y-4">
             <div className="space-y-2">
-              <Label>Account Verification</Label>
-              <div className="flex gap-2 p-1 bg-gray-100 rounded-lg">
-                <Button
-                  type="button"
-                  variant={!useOtpVerification ? "default" : "ghost"}
-                  onClick={() => setUseOtpVerification(false)}
-                  className="flex-1 text-sm"
-                  size="sm"
-                >
-                  Password
-                </Button>
-                <Button
-                  type="button"
-                  variant={useOtpVerification ? "default" : "ghost"}
-                  onClick={() => setUseOtpVerification(true)}
-                  className="flex-1 text-sm"
-                  size="sm"
-                >
-                  <Shield className="h-4 w-4 mr-1" />
-                  OTP
-                </Button>
-              </div>
-              <p className="text-xs text-gray-600">
-                {useOtpVerification 
-                  ? "We'll send a verification code to your email" 
-                  : "Create an account with a password"
-                }
-              </p>
-            </div>
-          )}
-          
-          <div className="space-y-2">
-            <Label htmlFor="name">Full Name</Label>
-            <Input
-              id="name"
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Your full name"
-              required
-              disabled={otpSent}
-            />
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="email">Work Email</Label>
-            <Input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="your.email@ecobank.com"
-              required
-              disabled={otpSent}
-            />
-          </div>
-
-          {!useOtpVerification && (
-            <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
+              <Label htmlFor="email">Work Email</Label>
               <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Choose a strong password"
+                id="email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="your.email@ecobank.com"
+                autoComplete="email"
+                disabled={loading || otpSent}
                 required
               />
             </div>
-          )}
 
-          <div className="space-y-2">
-            <Label htmlFor="role">Role</Label>
-            <Select value={role} onValueChange={setRole} required disabled={otpSent}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select your role" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="auditor">Internal Auditor</SelectItem>
-                <SelectItem value="auditee">Auditee (Client Department)</SelectItem>
-                <SelectItem value="manager">Manager/Head</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          {useOtpVerification && otpSent && (
             <div className="space-y-2">
-              <Label>Enter 6-digit OTP</Label>
-              <div className="text-sm text-gray-600 mb-2">
-                Verification code sent to: <span className="font-medium">{email}</span>
-              </div>
+              <Label htmlFor="name">Full Name</Label>
+              <Input
+                id="name"
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Your full name"
+                autoComplete="name"
+                disabled={loading || otpSent}
+                required
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="role">Role</Label>
+              <Select value={role} onValueChange={setRole} disabled={loading || otpSent} required>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select your role" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auditor">Internal Auditor</SelectItem>
+                  <SelectItem value="auditee">Auditee (Client Department)</SelectItem>
+                  <SelectItem value="manager">Manager/Head</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <Button onClick={sendSignupOtp} disabled={loading} className="w-full">
+              <Mail className="h-4 w-4 mr-2" />
+              {loading ? 'Sending…' : 'Send verification code'}
+            </Button>
+
+            <p className="text-xs text-gray-500 text-center">
+              We’ll email a 6-digit code to verify your address.
+            </p>
+          </div>
+        )}
+
+        {step === 'otp' && (
+          <div className="space-y-4">
+            <div className="text-sm text-gray-600">
+              Verification code sent to: <span className="font-medium">{email}</span>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Enter 6-digit code</Label>
               <div className="flex justify-center">
-                <InputOTP
-                  maxLength={6}
-                  value={otp}
-                  onChange={(value) => setOtp(value)}
-                >
+                <InputOTP maxLength={6} value={otp} onChange={(v: string) => setOtp(v)}>
                   <InputOTPGroup>
                     <InputOTPSlot index={0} />
                     <InputOTPSlot index={1} />
@@ -301,57 +250,56 @@ export function Signup({ onSignup }: SignupProps) {
                   </InputOTPGroup>
                 </InputOTP>
               </div>
+              <p className="text-xs text-gray-500 text-center">Code expires in 10 minutes.</p>
             </div>
-          )}
 
-          <Button 
-            type="submit" 
-            className="w-full" 
-            disabled={loading || (useOtpVerification && otpSent && otp.length !== 6)}
-          >
-            {loading ? (
-              useOtpVerification && !otpSent ? 'Sending OTP...' :
-              useOtpVerification && otpSent ? 'Verifying & Creating Account...' : 'Creating account...'
-            ) : (
-              useOtpVerification && !otpSent ? (
-                <>
-                  <Mail className="h-4 w-4 mr-2" />
-                  Send Verification Code
-                </>
-              ) :
-              useOtpVerification && otpSent ? 'Verify & Create Account' : 'Create Account'
-            )}
-          </Button>
+            <Button
+              onClick={verifyAndCreate}
+              disabled={loading || otp.length !== 6 || !name.trim() || !role}
+              className="w-full"
+            >
+              <Shield className="h-4 w-4 mr-2" />
+              {loading ? 'Verifying…' : 'Verify & Create Account'}
+            </Button>
 
-          {useOtpVerification && otpSent && (
-            <div className="space-y-2">
-              <div className="text-center">
-                <Button 
-                  type="button" 
-                  variant="link" 
-                  onClick={handleResendOtp}
-                  disabled={loading}
-                  className="text-sm"
-                >
-                  Didn't receive the code? Resend
-                </Button>
-              </div>
-              <Button 
-                type="button" 
-                variant="outline" 
-                className="w-full" 
-                onClick={() => {
-                  setOtpSent(false);
-                  setOtp('');
-                  setError('');
-                }}
+            <div className="flex items-center justify-between text-sm text-gray-600">
+              <button
+                type="button"
+                className="underline disabled:no-underline disabled:text-gray-400"
+                onClick={resendOtp}
+                disabled={resendCountdown > 0 || loading}
               >
-                Change Email or Method
-              </Button>
+                Resend code
+              </button>
+              {resendCountdown > 0 && <span>Resend available in {resendCountdown}s</span>}
             </div>
-          )}
-        </form>
+
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
+              onClick={() => {
+                setStep('form');
+                setOtp('');
+                setOtpSent(false);
+                setInfo(null);
+                setErr(null);
+              }}
+            >
+              Change details
+            </Button>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
+}
+
+/** Safely parse JSON response */
+async function safeJson(resp: Response) {
+  try {
+    return await resp.json();
+  } catch {
+    return null;
+  }
 }

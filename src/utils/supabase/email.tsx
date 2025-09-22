@@ -170,7 +170,7 @@ export const sendNewRequestEmail = async (
             <p>Please review the request and provide the necessary documentation by the due date.</p>
             <p>To access this request and submit the required documents, please create your ADERM account:</p>
             <p>Your email has been pre-filled for convenience.</p>
-            <a href="${Deno.env.get("NEXT_PUBLIC_APP_URL") || "http://localhost:3000"}/signup?mode=auditee-signup&email=${encodeURIComponent(data.auditeeEmail)}" class="button">Create My Account</a>
+            <a href="${Deno.env.get("NEXT_PUBLIC_APP_URL")}/signup?mode=auditee-signup&email=${encodeURIComponent(data.auditeeEmail)}" class="button">Create My Account</a>
             <p><strong>IMPORTANT:</strong></p>
             <ul>
                <li>Please review the request carefully and submit documents before the due date.</li>
@@ -350,7 +350,7 @@ export const sendWelcomeEmail = async (
           
           <p>To get started, log in to your account and explore the dashboard:</p>
           
-          <a href="${Deno.env.get("NEXT_PUBLIC_APP_URL") || "http://localhost:3000"}/dashboard" class="button">Access Dashboard</a>
+          <a href="${Deno.env.get("NEXT_PUBLIC_APP_URL")}/dashboard" class="button">Access Dashboard</a>
           
           <div class="feature">
             <h3>Need Help?</h3>
@@ -434,88 +434,3 @@ export const sendOTPEmail = async (data: AuthEmailData): Promise<boolean> => {
   );
 };
 
-
-// PASSWORD RESET EMAIL
-
-export const sendPasswordResetEmail = async (data: AuthEmailData): Promise<boolean> => {
-  if (!data.resetLink) {
-    throw new Error("resetLink is required for password reset email");
-  }
-
-  const htmlContent = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #2563eb;">Password Reset Request</h2>
-      <p>Hello ${data.userName},</p>
-      <p>You requested to reset your password for your ADERM account.</p>
-      <p style="text-align: center; margin: 30px 0;">
-        <a href="${data.resetLink}" style="background: #8d14ffff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px;">Reset Password</a>
-      </p>
-      <p>If you didn’t request this, please ignore this email.</p>
-      <p>This link will expire in 1 hour.</p>
-    </div>
-  `;
-
-  return await sendEmailViaSupabase(
-    [data.userEmail],
-    "ADERM - Password Reset Request",
-    htmlContent
-  );
-};
-
-
-// PASSWORD RESET CONFIRMATION EMAIL
-export const sendPasswordResetConfirmationEmail = async (
-  data: AuthEmailData
-): Promise<boolean> => {
-  const htmlContent = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background: #059669; color: white; padding: 20px; text-align: center; }
-        .content { padding: 20px; background: #f9fafb; }
-        .success { background: #d1fae5; padding: 15px; border-left: 4px solid #059669; margin: 15px 0; }
-        .warning { background: #fef3c7; padding: 15px; border-left: 4px solid #f59e0b; margin: 15px 0; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="header">
-          <h1>Password Reset Successful</h1>
-        </div>
-        <div class="content">
-          <p>Dear ${data.userName},</p>
-          
-          <div class="success">
-            <p><strong>Your password has been successfully reset!</strong></p>
-          </div>
-          
-          <p>Your ADERM account password has been changed successfully. You can now log in with your new password.</p>
-          
-          <div class="warning">
-            <p><strong>Security Notice:</strong> If you did not make this change, please contact our support team immediately.</p>
-          </div>
-          
-          <p>For your security, we recommend:</p>
-          <ul>
-            <li>Using a strong, unique password</li>
-            <li>Not sharing your password with anyone</li>
-            <li>Logging out of shared devices</li>
-          </ul>
-          
-          <p>Best regards,<br>ADERM Team</p>
-        </div>
-      </div>
-    </body>
-    </html>
-  `;
-
-  return await sendEmailViaSupabase(
-    [data.userEmail],
-    "Password Reset Successful - ADERM",
-    htmlContent
-  );
-};

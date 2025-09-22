@@ -10,9 +10,9 @@ import {
   triggerNewRequestEmail,
   triggerStatusChangeEmail,
   triggerWelcomeEmail,
-  triggerResetPasswordEmail,
+  triggerOTPEmail,
   sendEmailViaSupabase,
-}  from "./email-helpers.tsx";
+} from "./email-helpers.tsx";
 
 interface UserProfile {
   id: string;
@@ -20,6 +20,7 @@ interface UserProfile {
   name: string;
   role: "auditor" | "auditee" | "manager";
   created_at: string;
+  email_verified: boolean;
 }
 
 interface Request {
@@ -48,6 +49,7 @@ interface Document {
   uploaded_by: string;
   uploaded_at: string;
   comments?: string;
+  is_replacement?: boolean;
 }
 
 interface AuditLog {
@@ -72,113 +74,568 @@ interface EmailRecord {
 
 interface OTPRecord {
   code: string;
+  email: string;
+  user_id?: string;
   created_at: string;
   expires_at: string;
+  verified: boolean;
 }
 
+interface SessionToken {
+  user_id: string;
+  email: string;
+  created_at: string;
+  expires_at: string;
+  login_method: string;
+}
+
+// Initialize Supabase client
+const supabase = createClient(
+  Deno.env.get("SUPABASE_URL")!,
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+);
+
+// Initialize Hono app
 const app = new Hono();
 
-    const { data, error } = await supabase.auth.admin.createUser({
-      email,
-      password,
-      user_metadata: { name, role },
-      email_confirm: true,
-    });
+// But you're using app.use() and app.post() throughout the file
+app.use("*", logger(console.log));
 
+// Enable CORS for all routes and methods
+app.use(
+  "/*",
+  cors({
+    origin: "*",
+    allowHeaders: ["Content-Type", "Authorization"],
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    exposeHeaders: ["Content-Length"],
+    maxAge: 600,
+  })
+);
+
+// Initialize storage bucket on startup
+const bucketName = "make-fcebfd37-audit-documents";
+const initializeStorage = async () => {
+  try {
+    const { data: buckets } = await supabase.storage.listBuckets();
+    const bucketExists = buckets?.some((bucket) => bucket.name === bucketName);
+    if (!bucketExists) {
+      await supabase.storage.createBucket(bucketName, {
+        public: false,
+      });
+      console.log(`Created bucket: ${bucketName}`);
+    }
+  } catch (error) {
+    console.error("Error initializing storage:", error);
+  }
+};
+
+initializeStorage();
+
+// Helper function to get user from session token or auth token
+const getUserFromToken = async (authHeader: string | undefined) => {
+  if (!authHeader) {
+    console.log("getUserFromToken - No auth header provided");
+    return null;
+  }
+
+  const token = authHeader.split(" ")[1];
+  console.log("getUserFromToken - Token:", token.substring(0, 20) + "...");
+
+  // Check if it's an OTP session token
+  if (token.startsWith("otp_session_")) {
+    console.log("getUserFromToken - OTP session token detected");
+    try {
+      const sessionData: SessionToken | null = await kv.get(token);
+      console.log("getUserFromToken - Session data:", sessionData);
+
+      if (sessionData) {
+        // Check if session is expired
+        const expiresAt = new Date(sessionData.expires_at);
+        const now = new Date();
+        console.log(
+          "getUserFromToken - Session expires:",
+          expiresAt,
+          "Current time:",
+          now
+        );
+
+        if (now > expiresAt) {
+          console.log("getUserFromToken - Session expired, deleting");
+          await kv.del(token);
+          return null;
+        }
+        console.log(
+          "getUserFromToken - Returning user ID:",
+          sessionData.user_id
+        );
+        return { id: sessionData.user_id };
+      }
+      console.log("getUserFromToken - No session data found");
+      return null;
+    } catch (error) {
+      console.error("Error getting session from KV store:", error);
+      return null;
+    }
+  }
+
+  // Otherwise, try to get user from Supabase auth token
+  console.log("getUserFromToken - Using Supabase auth token");
+  try {
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser(token);
     if (error) {
-      console.error("Signup error:", error);
-      return c.json({ error: error.message }, 400);
+      console.error("getUserFromToken - Supabase auth error:", error);
+    }
+    return user;
+  } catch (error) {
+    console.error("Error getting user from auth token:", error);
+    return null;
+  }
+};
+
+// OTP generation and sending for login (existing users)
+app.post("/make-server-fcebfd37/send-otp", async (c) => {
+  try {
+    const { email } = await c.req.json();
+    if (!email) return c.json({ error: "Email is required" }, 400);
+
+    const okDomain = /^[^\s@]+@ecobank\.com$/i;
+    if (!okDomain.test(email)) {
+      return c.json(
+        { error: "Please use your Ecobank email address (@ecobank.com)" },
+        400
+      );
     }
 
-    // Store user info in KV store
-    await kv.set(`user:${data.user.id}`, {
-      id: data.user.id,
-      email,
-      name,
-      role,
-      created_at: new Date().toISOString(),
-    });
+    // Check if user exists (login is for existing accounts)
+    const allUsers: UserProfile[] = await kv.getByPrefix("user:");
+    const existingUser = allUsers.find(
+      (u) => u.email.toLowerCase() === email.toLowerCase()
+    );
+    if (!existingUser) {
+      return c.json(
+        {
+          error: "Account not found. Please sign up first.",
+        },
+        404
+      );
+    }
 
-    // Check for pending requests assigned to this email and assign them
-    const allRequests: Request[] = await kv.getByPrefix("request:");
-    const pendingRequests = allRequests.filter(
-      (req) => req.pending_assignment && req.assigned_to_email === email
+    // Generate & store login OTP (10 mins)
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpKey = `login_otp:${email.toLowerCase()}`;
+    await kv.set(otpKey, {
+      code: otp,
+      email,
+      user_id: existingUser.id, // Store user ID for login
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      verified: false,
+    } satisfies OTPRecord);
+
+    // Send OTP email using the email helper
+    const result = await triggerOTPEmail(
+      {
+        id: existingUser.id,
+        email,
+        name: existingUser.name,
+        role: existingUser.role,
+      },
+      otp
     );
 
-    for (const request of pendingRequests) {
-      const updatedRequest: Request = {
-        ...request,
-        assigned_to: data.user.id,
-        pending_assignment: false,
-        updated_at: new Date().toISOString(),
-      };
-      await kv.set(`request:${request.id}`, updatedRequest);
-
-      // Log automatic assignment
-      await kv.set(`audit_log:${Date.now()}:${data.user.id}`, {
-        action: "auto_assigned_request",
-        user_id: data.user.id,
-        request_id: request.id,
-        timestamp: new Date().toISOString(),
-        details: {
-          email,
-          request_title: request.title,
-          created_by: request.created_by,
-        },
-      });
+    if (!result.success) {
+      return c.json({ error: "Failed to send login OTP email" }, 500);
     }
 
-    if (pendingRequests.length > 0) {
-      console.log(`Auto-assigned ${pendingRequests.length} pending requests to user ${email}`);
+    return c.json({
+      success: true,
+      message: "Login OTP sent successfully",
+    });
+  } catch (e) {
+    console.error("Error sending login OTP:", e);
+    return c.json({ error: "Internal server error" }, 500);
+  }
+});
+
+// Helper function for authentication
+const authenticateUser = async (authHeader: string | undefined) => {
+  const user = await getUserFromToken(authHeader);
+  return { user, error: !user?.id ? "Unauthorized" : null };
+};
+
+// OTP generation and sending for signup
+app.post("/make-server-fcebfd37/send-signup-otp", async (c) => {
+  try {
+    const { email } = await c.req.json();
+    if (!email) return c.json({ error: "Email is required" }, 400);
+
+    const okDomain = /^[^\s@]+@ecobank\.com$/i;
+    if (!okDomain.test(email)) {
+      return c.json(
+        { error: "Please use your Ecobank email address (@ecobank.com)" },
+        400
+      );
+    }
+
+    // Check if user already exists (signup is for new accounts)
+    const allUsers: UserProfile[] = await kv.getByPrefix("user:");
+    const existingUser = allUsers.find(
+      (u) => u.email.toLowerCase() === email.toLowerCase()
+    );
+    if (existingUser) {
+      return c.json(
+        {
+          error:
+            "An account with this email already exists. Please log in instead.",
+        },
+        400
+      );
+    }
+
+    // Generate & store signup OTP (10 mins)
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpKey = `otp:${email.toLowerCase()}`; // Note: different key format for signup
+    await kv.set(otpKey, {
+      code: otp,
+      email,
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      verified: false,
+    } satisfies OTPRecord);
+
+    // Build signup email
+    const subject = "ADERM: Your Signup Verification Code";
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background:#fff;">
+        <div style="background:#1e40af;color:#fff;padding:20px;text-align:center;">
+          <h1 style="margin:0;font-size:24px;">🛡️ ADERM Platform</h1>
+          <p style="margin:5px 0 0;">Signup Verification Code</p>
+        </div>
+        <div style="padding:30px 20px;text-align:center;">
+          <p style="color:#374151;font-size:16px;">Welcome to ADERM!</p>
+          <p style="color:#374151;font-size:16px;">Use the code below to complete your registration.</p>
+          <div style="background:#f3f4f6;padding:30px 20px;border-radius:8px;margin:20px 0;">
+            <div style="font-size:32px;font-weight:bold;color:#1e40af;letter-spacing:8px;font-family:monospace;">${otp}</div>
+            <p style="color:#6b7280;font-size:14px;margin-top:15px;">This code expires in 10 minutes</p>
+          </div>
+          <div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:15px;margin:20px 0;text-align:left;">
+            <h4 style="color:#92400e;margin:0 0 10px;">⚠️ SECURITY NOTICE</h4>
+            <ul style="color:#92400e;margin:0;padding-left:20px;">
+              <li>Do not share this code with anyone</li>
+              <li>ADERM staff will never ask for this code</li>
+            </ul>
+          </div>
+        </div>
+        <div style="background:#f9fafb;padding:20px;text-align:center;border-top:1px solid #e5e7eb;">
+          <p style="color:#6b7280;font-size:12px;margin:0;">Sent: ${new Date().toLocaleString()}</p>
+        </div>
+      </div>`;
+
+    const ok = await sendEmailViaSupabase([email], subject, html);
+    if (!ok)
+      return c.json({ error: "Failed to send signup verification email" }, 500);
+
+    return c.json({
+      success: true,
+      message: "Signup verification code sent successfully",
+    });
+  } catch (e) {
+    console.error("Error sending signup OTP:", e);
+    return c.json({ error: "Internal server error" }, 500);
+  }
+});
+
+// OTP verification for login
+app.post("/make-server-fcebfd37/verify-login-otp", async (c) => {
+  try {
+    const { email, otp } = await c.req.json();
+    if (!email || !otp)
+      return c.json({ error: "Email and OTP are required" }, 400);
+
+    const otpKey = `login_otp:${email.toLowerCase()}`;
+    const rec: OTPRecord | null = await kv.get(otpKey);
+    if (!rec) return c.json({ error: "Invalid or expired login code" }, 400);
+
+    if (new Date() > new Date(rec.expires_at)) {
+      await kv.del(otpKey);
+      return c.json(
+        { error: "Login code has expired. Please request a new one." },
+        400
+      );
+    }
+    if (rec.verified)
+      return c.json({ error: "Login code has already been used" }, 400);
+    if (rec.code !== otp) return c.json({ error: "Invalid login code" }, 400);
+
+    // Resolve user profile (prefer stored user_id; fallback by email)
+    let userProfile: UserProfile | null = null;
+    if (rec.user_id) userProfile = await kv.get(`user:${rec.user_id}`);
+    if (!userProfile) {
+      const allUsers: UserProfile[] = await kv.getByPrefix("user:");
+      userProfile =
+        allUsers.find((u) => u.email.toLowerCase() === email.toLowerCase()) ||
+        null;
+    }
+    if (!userProfile) return c.json({ error: "User profile not found" }, 404);
+
+    // Create OTP session (1 hour)
+    const sessionToken = `otp_session_${Date.now()}_${Math.random()
+      .toString(36)
+      .slice(2, 16)}`;
+    await kv.set(sessionToken, {
+      user_id: userProfile.id,
+      email,
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      login_method: "otp",
+    } satisfies SessionToken);
+
+    await kv.del(otpKey); // one-time use
+
+    await kv.set(`audit_log:${Date.now()}:${userProfile.id}`, {
+      action: "user_login_otp",
+      user_id: userProfile.id,
+      timestamp: new Date().toISOString(),
+      details: { email, login_method: "otp" },
+    });
+
+    return c.json({
+      success: true,
+      user: userProfile,
+      session_token: sessionToken,
+    });
+  } catch (e) {
+    console.error("Error verifying login OTP:", e);
+    return c.json({ error: "Internal server error" }, 500);
+  }
+});
+
+// Verify OTP and complete signup
+app.post("/make-server-fcebfd37/verify-otp-signup", async (c) => {
+  try {
+    const { email, otp, name, role } = await c.req.json();
+
+    if (!email || !otp || !name) {
+      return c.json({ error: "Email, OTP, and name are required" }, 400);
+    }
+
+    // Use role from request or default to auditee
+    const userRole = role || "auditee";
+
+    // Validate role
+    if (!["auditor", "auditee", "manager"].includes(userRole)) {
+      return c.json({ error: "Invalid role" }, 400);
+    }
+
+    // Validate @ecobank.com email domain
+    const ecobankEmailRegex = /^[^\s@]+@ecobank\.com$/;
+    if (!ecobankEmailRegex.test(email)) {
+      return c.json(
+        { error: "Please use your Ecobank email address (@ecobank.com)" },
+        400
+      );
+    }
+
+    // Check if user already exists
+    const users: UserProfile[] = await kv.getByPrefix("user:");
+    const existingUser = users.find((user) => user.email === email);
+    if (existingUser) {
+      return c.json(
+        {
+          error:
+            "An account with this email already exists. Please log in instead.",
+        },
+        400
+      );
+    }
+
+    // Retrieve stored OTP
+    const otpKey = `otp:${email}`;
+    const storedOtpData: OTPRecord | null = await kv.get(otpKey);
+
+    if (!storedOtpData) {
+      return c.json({ error: "Invalid or expired OTP" }, 400);
+    }
+
+    // Check if OTP is expired
+    const expiresAt = new Date(storedOtpData.expires_at);
+    if (new Date() > expiresAt) {
+      await kv.del(otpKey);
+      return c.json(
+        { error: "OTP has expired. Please request a new one." },
+        400
+      );
+    }
+
+    // Verify OTP
+    if (storedOtpData.code !== otp) {
+      return c.json({ error: "Invalid OTP" }, 400);
+    }
+
+    // Check if OTP was already used
+    if (storedOtpData.verified) {
+      return c.json({ error: "OTP has already been used" }, 400);
+    }
+
+    // Create user account
+    const { data: authUser, error: authError } =
+      await supabase.auth.admin.createUser({
+        email: email,
+        email_confirm: true, // Auto-confirm since we verified via OTP
+        user_metadata: {
+          name: name.trim(),
+          role: userRole,
+        },
+      });
+
+    if (authError) {
+      console.error("Error creating user in Supabase Auth:", authError);
+      return c.json({ error: "Failed to create user account" }, 500);
+    }
+
+    // Store user profile in KV store
+    const userId = authUser.user.id;
+    await kv.set(`user:${userId}`, {
+      id: userId,
+      email: email,
+      name: name.trim(),
+      role: userRole,
+      created_at: new Date().toISOString(),
+      email_verified: true,
+    });
+
+    // Mark OTP as verified and delete it
+    await kv.del(otpKey);
+
+    // Check for pending requests assigned to this email (only for auditees)
+    let pendingRequestsCount = 0;
+    if (userRole === "auditee") {
+      const allRequests: Request[] = await kv.getByPrefix("request:");
+      const pendingRequests = allRequests.filter(
+        (req) =>
+          req.assigned_to_email === email && req.pending_assignment === true
+      );
+
+      // Update pending requests to assign them to the new user
+      for (const request of pendingRequests) {
+        const updatedRequest: Request = {
+          ...request,
+          assigned_to: userId,
+          pending_assignment: false,
+          updated_at: new Date().toISOString(),
+        };
+        await kv.set(`request:${request.id}`, updatedRequest);
+
+        // Log automatic assignment
+        await kv.set(`audit_log:${Date.now()}:${userId}`, {
+          action: "auto_assigned_request",
+          user_id: userId,
+          request_id: request.id,
+          timestamp: new Date().toISOString(),
+          details: {
+            email,
+            request_title: request.title,
+            created_by: request.created_by,
+          },
+        });
+      }
+
+      pendingRequestsCount = pendingRequests.length;
     }
 
     // Log user creation
-    await kv.set(`audit_log:${Date.now()}:${data.user.id}`, {
+    await kv.set(`audit_log:${Date.now()}:${userId}`, {
       action: "user_created",
-      user_id: data.user.id,
+      user_id: userId,
       timestamp: new Date().toISOString(),
-      details: { email, name, role },
+      details: { email, name: name.trim(), role: userRole },
     });
 
-    return c.json({ user: data.user, success: true });
+    // Send welcome email
+    try {
+      const result = await triggerWelcomeEmail({
+        id: userId,
+        email,
+        name: name.trim(),
+        role: userRole,
+      });
+      if (!result.success) {
+        console.error("Failed to send welcome email:", result.error);
+      }
+    } catch (emailError) {
+      console.error("Error sending welcome email:", emailError);
+    }
+
+    console.log(
+      `✅ User created successfully: ${email} (${userRole}) (${userId}), ${pendingRequestsCount} requests assigned`
+    );
+
+    return c.json({
+      success: true,
+      user: {
+        id: userId,
+        email: email,
+        name: name.trim(),
+        role: userRole,
+      },
+      pending_requests_assigned: pendingRequestsCount,
+    });
   } catch (error) {
-    console.error("Signup error:", error);
-    return c.json({ error: "Internal server error during signup" }, 500);
+    console.error("Error verifying OTP and creating user:", error);
+    return c.json({ error: "Internal server error" }, 500);
   }
 });
 
 // Get user profile
 app.get("/make-server-fcebfd37/profile", async (c) => {
   try {
-    const { user, error } = await authenticateUser(c.req.header("Authorization"));
-    
-    if (!user?.id || error) {
+    const authHeader = c.req.header("Authorization");
+    console.log("Profile request - Auth header:", authHeader);
+
+    const user = await getUserFromToken(authHeader);
+    console.log("Profile request - User from token:", user);
+
+    if (!user?.id) {
+      console.log("Profile request - No user ID found");
       return c.json({ error: "Unauthorized" }, 401);
     }
 
     const userProfile: UserProfile | null = await kv.get(`user:${user.id}`);
+    console.log("Profile request - User profile:", userProfile);
+
+    if (!userProfile) {
+      console.log("Profile request - No user profile found for ID:", user.id);
+      return c.json({ error: "User profile not found" }, 404);
+    }
+
     return c.json({ user: userProfile });
   } catch (error) {
-    console.error("Profile fetch error:", error);
-    return c.json(
-      { error: "Internal server error while fetching profile" },
-      500
-    );
+    console.error("Error fetching profile:", error);
+    return c.json({ error: "Internal server error" }, 500);
   }
 });
 
 // Create document request
 app.post("/make-server-fcebfd37/requests", async (c) => {
   try {
-    const { user, error } = await authenticateUser(c.req.header("Authorization"));
-    
+    const { user, error } = await authenticateUser(
+      c.req.header("Authorization")
+    );
+
     if (!user?.id || error) {
       return c.json({ error: "Unauthorized" }, 401);
     }
 
     const userProfile: UserProfile | null = await kv.get(`user:${user.id}`);
-    if (!userProfile || userProfile.role !== "auditor") {
-      return c.json({ error: "Only auditors can create requests" }, 403);
+    if (
+      !userProfile ||
+      (userProfile.role !== "auditor" && userProfile.role !== "manager")
+    ) {
+      return c.json({ error: "Insufficient permissions" }, 403);
     }
 
     const {
@@ -188,9 +645,16 @@ app.post("/make-server-fcebfd37/requests", async (c) => {
       assigned_to_email,
       department,
       cc_emails,
+      hr_confidential,
     } = await c.req.json();
 
-    if (!title || !description || !due_date || !assigned_to_email || !department) {
+    if (
+      !title ||
+      !description ||
+      !due_date ||
+      !assigned_to_email ||
+      !department
+    ) {
       return c.json({ error: "Missing required fields" }, 400);
     }
 
@@ -212,12 +676,13 @@ app.post("/make-server-fcebfd37/requests", async (c) => {
       title,
       description,
       due_date,
-      status: "submitted",
+      status: "in_progress",
       created_by: user.id,
       assigned_to: assignedUserId,
       assigned_to_email,
       department,
       cc_emails: cc_emails || [],
+      hr_confidential: hr_confidential || false,
       pending_assignment: !assignedUserId,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -268,8 +733,10 @@ app.post("/make-server-fcebfd37/requests", async (c) => {
 // Get requests (filtered by user role)
 app.get("/make-server-fcebfd37/requests", async (c) => {
   try {
-    const { user, error } = await authenticateUser(c.req.header("Authorization"));
-    
+    const { user, error } = await authenticateUser(
+      c.req.header("Authorization")
+    );
+
     if (!user?.id || error) {
       return c.json({ error: "Unauthorized" }, 401);
     }
@@ -301,7 +768,8 @@ app.get("/make-server-fcebfd37/requests", async (c) => {
       filteredRequests = allRequests.filter(
         (req) =>
           req.assigned_to === user.id ||
-          (req.pending_assignment && req.assigned_to_email === userProfile.email)
+          (req.pending_assignment &&
+            req.assigned_to_email === userProfile.email)
       );
     }
 
@@ -316,10 +784,12 @@ app.get("/make-server-fcebfd37/requests", async (c) => {
 });
 
 // Upload document for a request
-app.post("/make-server-fcebfd37/upload", async (c) => {
+app.post("/make-server-fcebfd37/upload", async (c: import("hono").Context) => {
   try {
-    const { user, error } = await authenticateUser(c.req.header("Authorization"));
-    
+    const { user, error } = await authenticateUser(
+      c.req.header("Authorization")
+    );
+
     if (!user?.id || error) {
       return c.json({ error: "Unauthorized" }, 401);
     }
@@ -344,7 +814,8 @@ app.post("/make-server-fcebfd37/upload", async (c) => {
     // Check if user has access to this request
     const hasAccess: boolean =
       request.assigned_to === user.id ||
-      (request.pending_assignment && request.assigned_to_email === userProfile?.email) ||
+      (request.pending_assignment &&
+        request.assigned_to_email === userProfile?.email) ||
       userProfile?.role === "auditor";
 
     if (!hasAccess) {
@@ -352,11 +823,15 @@ app.post("/make-server-fcebfd37/upload", async (c) => {
     }
 
     // If this is a pending assignment, resolve it now
-    if (request.pending_assignment && request.assigned_to_email === userProfile?.email) {
+    if (
+      request.pending_assignment &&
+      request.assigned_to_email === userProfile?.email
+    ) {
       const updatedRequest: Request = {
         ...request,
         assigned_to: user.id,
         pending_assignment: false,
+        // Remove the undefined newStatus line!
         updated_at: new Date().toISOString(),
       };
       await kv.set(`request:${requestId}`, updatedRequest);
@@ -435,8 +910,10 @@ app.post("/make-server-fcebfd37/upload", async (c) => {
 // Get documents for a request
 app.get("/make-server-fcebfd37/requests/:requestId/documents", async (c) => {
   try {
-    const { user, error } = await authenticateUser(c.req.header("Authorization"));
-    
+    const { user, error } = await authenticateUser(
+      c.req.header("Authorization")
+    );
+
     if (!user?.id || error) {
       return c.json({ error: "Unauthorized" }, 401);
     }
@@ -453,7 +930,8 @@ app.get("/make-server-fcebfd37/requests/:requestId/documents", async (c) => {
     // Check if user has access to view documents for this request
     const hasAccess: boolean =
       request.assigned_to === user.id ||
-      (request.pending_assignment && request.assigned_to_email === userProfile?.email) ||
+      (request.pending_assignment &&
+        request.assigned_to_email === userProfile?.email) ||
       userProfile?.role === "auditor" ||
       userProfile?.role === "manager";
 
@@ -462,10 +940,14 @@ app.get("/make-server-fcebfd37/requests/:requestId/documents", async (c) => {
     }
 
     // Special handling for HR department requests - auditors cannot access documents
-    if (request.department === "Human Resources" && userProfile?.role === "auditor") {
+    if (
+      request.department === "Human Resources" &&
+      userProfile?.role === "auditor"
+    ) {
       return c.json(
         {
-          error: "Access denied to confidential HR department documents. Contact your manager for access.",
+          error:
+            "Access denied to confidential HR department documents. Contact your manager for access.",
           confidential: true,
         },
         403
@@ -498,42 +980,43 @@ app.get("/make-server-fcebfd37/requests/:requestId/documents", async (c) => {
 // Update request status
 app.put("/make-server-fcebfd37/requests/:requestId/status", async (c) => {
   try {
-  // Get the actual auditee user data
-  let auditeeUser;
-  if (updatedRequest.assigned_to) {
-    auditeeUser = await kv.get(`user:${updatedRequest.assigned_to}`);
-  }
-  
-  // Fallback if user not found
-  if (!auditeeUser) {
-    auditeeUser = {
-      id: updatedRequest.assigned_to,
-      email: updatedRequest.assigned_to_email,
-      name: updatedRequest.assigned_to_email.split('@')[0],
-      role: "auditee" as const,
-    };
-  }
+    const { user, error } = await authenticateUser(
+      c.req.header("Authorization")
+    );
 
-  const result = await triggerStatusChangeEmail(
-    updatedRequest,
-    auditeeUser,
-    userProfile,
-    null
-  );
+    if (!user?.id || error) {
+      return c.json({ error: "Unauthorized" }, 401);
+    }
 
-  if (!result.success) {
-    console.error("Failed to send status change email:", result.error);
-  }
-} catch (emailError) {
-  console.error("Error sending status change email:", emailError);
-}
+    const requestId = c.req.param("requestId");
+    const { status } = await c.req.json();
 
+    if (!status) {
+      return c.json({ error: "Status is required" }, 400);
+    }
+
+    const request: Request | null = await kv.get(`request:${requestId}`);
+    if (!request) {
+      return c.json({ error: "Request not found" }, 404);
+    }
+
+    const userProfile: UserProfile | null = await kv.get(`user:${user.id}`);
+    if (
+      !userProfile ||
+      (userProfile.role !== "auditor" && userProfile.role !== "manager")
+    ) {
+      return c.json({ error: "Insufficient permissions" }, 403);
+    }
 
     // Special handling for HR department requests
-    if (request.department === "Human Resources" && userProfile?.role === "auditor") {
+    if (
+      request.department === "Human Resources" &&
+      userProfile?.role === "auditor"
+    ) {
       return c.json(
         {
-          error: "Access denied. Only managers can update status for confidential HR department requests.",
+          error:
+            "Access denied. Only managers can update status for confidential HR department requests.",
         },
         403
       );
@@ -560,16 +1043,33 @@ app.put("/make-server-fcebfd37/requests/:requestId/status", async (c) => {
       },
     });
 
+
+    const requestWithPreviousStatus = {
+      ...updatedRequest,
+      previousStatus: request.status, // Add the previous status
+    };
+
     // Trigger status change email
     try {
-      const result = await triggerStatusChangeEmail(
-        updatedRequest,
-        {
+      // Get the actual auditee user data
+      let auditeeUser;
+      if (updatedRequest.assigned_to) {
+        auditeeUser = await kv.get(`user:${updatedRequest.assigned_to}`);
+      }
+
+      // Fallback if user not found
+      if (!auditeeUser) {
+        auditeeUser = {
           id: updatedRequest.assigned_to,
           email: updatedRequest.assigned_to_email,
-          name: updatedRequest.assigned_to_email,
-          role: "auditee",
-        },
+          name: updatedRequest.assigned_to_email.split("@")[0],
+          role: "auditee" as const,
+        };
+      }
+
+      const result = await triggerStatusChangeEmail(
+        requestWithPreviousStatus,
+        auditeeUser,
         userProfile,
         null
       );
@@ -591,101 +1091,13 @@ app.put("/make-server-fcebfd37/requests/:requestId/status", async (c) => {
   }
 });
 
-// Check if user exists for password reset
-app.post("/make-server-fcebfd37/check-user-exists", async (c) => {
-  try {
-    const { email } = await c.req.json();
-
-    if (!email) {
-      return c.json({ error: "Email is required" }, 400);
-    }
-
-    // Check if user exists in our KV store
-    const users: UserProfile[] = await kv.getByPrefix("user:");
-    const userExists = users.some((user) => user.email === email);
-
-    return c.json({ exists: userExists });
-  } catch (error) {
-    console.error("User check error:", error);
-    return c.json({ error: "Internal server error while checking user" }, 500);
-  }
-});
-
-// Request password reset
-app.post("/make-server-fcebfd37/request-password-reset", async (c) => {
-  try {
-    const { email } = await c.req.json();
-
-    if (!email) {
-      return c.json({ error: "Email is required" }, 400);
-    }
-
-    // Check if user exists in KV
-    const users: UserProfile[] = await kv.getByPrefix("user:");
-    const user = users.find((u) => u.email === email);
-
-    if (!user) {
-      return c.json(
-        {
-          error: "No account found with this email address. Please check your email or sign up for a new account.",
-          user_not_found: true,
-        },
-        404
-      );
-    }
-
-    // Generate password reset link manually
-    const { data, error: resetError } = await supabase.auth.admin.generateLink({
-      type: "recovery",
-      email: email,
-      options: {
-        redirectTo: `${c.req.header("origin") || "http://localhost:3000"}/reset-password`,
-      },
-    });
-
-    if (resetError || !data) {
-      console.error("Password reset link error:", resetError);
-      return c.json(
-        { error: "Failed to generate password reset link. Please try again." },
-        500
-      );
-    }
-
-    // Send password reset email via Resend
-    try {
-      const result = await triggerResetPasswordEmail(email, data.action_link);
-      if (!result.success) {
-        console.error("Failed to send reset password email:", result.error);
-        return c.json({ error: "Failed to send reset password email" }, 500);
-      }
-    } catch (emailError) {
-      console.error("Error sending reset password email:", emailError);
-      return c.json({ error: "Error while sending reset password email" }, 500);
-    }
-
-    // Log reset request
-    await kv.set(`audit_log:${Date.now()}:${user.id}`, {
-      action: "password_reset_requested",
-      user_id: user.id,
-      timestamp: new Date().toISOString(),
-      details: { email },
-    });
-
-    return c.json({ success: true });
-  } catch (error) {
-    console.error("Password reset error:", error);
-    return c.json(
-      { error: "Internal server error while processing password reset" },
-      500
-    );
-  }
-});
-
 // Get audit logs
 app.get("/make-server-fcebfd37/audit-logs", async (c) => {
   try {
-    const { user, error } = await authenticateUser(c.req.header("Authorization"));
-    
+    const { user, error } = await authenticateUser(
+      c.req.header("Authorization")
+    );
+
     if (!user?.id || error) {
       return c.json({ error: "Unauthorized" }, 401);
     }
@@ -697,7 +1109,8 @@ app.get("/make-server-fcebfd37/audit-logs", async (c) => {
 
     const auditLogs: AuditLog[] = await kv.getByPrefix("audit_log:");
     const sortedLogs = auditLogs.sort(
-      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      (a, b) =>
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
     );
 
     return c.json({ logs: sortedLogs });
@@ -713,8 +1126,10 @@ app.get("/make-server-fcebfd37/audit-logs", async (c) => {
 // Send departmental analysis report via email
 app.post("/make-server-fcebfd37/send-report", async (c) => {
   try {
-    const { user, error } = await authenticateUser(c.req.header("Authorization"));
-    
+    const { user, error } = await authenticateUser(
+      c.req.header("Authorization")
+    );
+
     if (!user?.id || error) {
       return c.json({ error: "Unauthorized" }, 401);
     }
@@ -742,9 +1157,9 @@ app.post("/make-server-fcebfd37/send-report", async (c) => {
 
     // Send via Supabase → Resend
     try {
-      const result = await sendEmailViaSupabase([to], subject, emailBody);
-      if (!result.success) {
-        console.error("Failed to send report email:", result.error);
+      const success = await sendEmailViaSupabase([to], subject, emailBody);
+      if (!success) {
+        console.error("Failed to send report email");
         return c.json({ error: "Failed to send report email" }, 500);
       }
     } catch (err) {
@@ -786,230 +1201,13 @@ app.post("/make-server-fcebfd37/send-report", async (c) => {
   }
 });
 
-// Send OTP for auditee signup
-app.post("/make-server-fcebfd37/send-otp", async (c) => {
-  try {
-    const { email } = await c.req.json();
-
-    if (!email) {
-      return c.json({ error: "Email is required" }, 400);
-    }
-
-    // Validate @ecobank.com domain
-    const ecobankEmailRegex = /^[^\s@]+@ecobank\.com$/;
-    if (!ecobankEmailRegex.test(email)) {
-      return c.json(
-        { error: "Please use your Ecobank email address (@ecobank.com)" },
-        400
-      );
-    }
-
-    // Check if user already exists
-    const users: UserProfile[] = await kv.getByPrefix("user:");
-    const existingUser = users.find((user) => user.email === email);
-    if (existingUser) {
-      return c.json(
-        {
-          error: "An account with this email already exists. Please log in instead.",
-        },
-        400
-      );
-    }
-
-    // Generate 6-digit OTP
-    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-
-    // Email subject + HTML body
-    const emailSubject = "ADERM - Your verification code";
-    const emailBody = `
-      <p>Hello,</p>
-      <p>Your verification code for the ADERM platform is:</p>
-      <h2>${otpCode}</h2>
-      <p>This code will expire in 10 minutes. Please enter this code to complete your registration.</p>
-      <p>If you didn't request this code, please ignore this email.</p>
-      <hr>
-      <p>Generated: ${new Date().toLocaleString()}</p>
-    `;
-
-    // Send email via Supabase → Resend
-    try {
-      const result = await sendEmailViaSupabase([email], emailSubject, emailBody);
-      if (!result.success) {
-        console.error("Failed to send OTP email:", result.error);
-        return c.json({ error: "Failed to send OTP email" }, 500);
-      }
-    } catch (err) {
-      console.error("Error sending OTP email:", err);
-      return c.json({ error: "Error while sending OTP email" }, 500);
-    }
-
-    // Store OTP temporarily
-    await kv.set(`otp:${email}`, {
-      code: otpCode,
-      created_at: new Date().toISOString(),
-      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(), // 10 min
-    });
-
-    // Store email metadata in KV (audit trail)
-    const emailId = `email_${Date.now()}_${Math.random()
-      .toString(36)
-      .substr(2, 9)}`;
-    await kv.set(`email:${emailId}`, {
-      id: emailId,
-      to: email,
-      subject: emailSubject,
-      body: emailBody,
-      sent_by: "system",
-      sent_at: new Date().toISOString(),
-      status: "sent",
-      email_type: "otp_verification",
-    });
-
-    return c.json({ success: true });
-  } catch (error) {
-    console.error("OTP send error:", error);
-    return c.json({ error: "Internal server error while sending OTP" }, 500);
-  }
-});
-
-// Verify OTP and complete signup
-app.post("/make-server-fcebfd37/verify-otp-signup", async (c) => {
-  try {
-    const { email, otp, name, role } = await c.req.json();
-
-    if (!email || !otp || !name) {
-      return c.json({ error: "Missing required fields" }, 400);
-    }
-
-    // Default role to auditee if not specified
-    const userRole = role || "auditee";
-
-    // Validate role
-    if (!["auditor", "auditee", "manager"].includes(userRole)) {
-      return c.json({ error: "Invalid role" }, 400);
-    }
-
-    // Validate @ecobank.com email domain
-    const ecobankEmailRegex = /^[^\s@]+@ecobank\.com$/;
-    if (!ecobankEmailRegex.test(email)) {
-      return c.json(
-        { error: "Please use your Ecobank email address (@ecobank.com)" },
-        400
-      );
-    }
-
-    // Check if user already exists
-    const users: UserProfile[] = await kv.getByPrefix("user:");
-    const existingUser = users.find((user) => user.email === email);
-    if (existingUser) {
-      return c.json(
-        { error: "An account with this email already exists. Please log in instead." },
-        400
-      );
-    }
-
-    // Verify OTP
-    const storedOTP: OTPRecord | null = await kv.get(`otp:${email}`);
-    if (!storedOTP) {
-      return c.json({ error: "OTP not found or expired. Please request a new one." }, 400);
-    }
-
-    // Check if OTP expired
-    if (new Date() > new Date(storedOTP.expires_at)) {
-      await kv.del(`otp:${email}`);
-      return c.json({ error: "OTP has expired. Please request a new one." }, 400);
-    }
-
-    // Check OTP match
-    if (storedOTP.code !== otp) {
-      return c.json({ error: "Invalid OTP. Please check and try again." }, 400);
-    }
-
-    // OTP is valid → create user in Supabase
-    const { data, error: createError } = await supabase.auth.admin.createUser({
-      email,
-      password: `temp_${Date.now()}_${Math.random().toString(36)}`,
-      user_metadata: { name, role: userRole },
-      email_confirm: true,
-    });
-
-    if (createError || !data?.user) {
-      console.error("User creation error:", createError);
-      return c.json({ error: "Failed to create account. Please try again." }, 500);
-    }
-
-    // Store user info in KV
-    await kv.set(`user:${data.user.id}`, {
-      id: data.user.id,
-      email,
-      name,
-      role: userRole,
-      created_at: new Date().toISOString(),
-    });
-
-    // Assign pending requests (if any)
-    const allRequests: Request[] = await kv.getByPrefix("request:");
-    const pendingRequests = allRequests.filter(
-      (req) => req.pending_assignment && req.assigned_to_email === email
-    );
-
-    for (const request of pendingRequests) {
-      const updatedRequest: Request = {
-        ...request,
-        assigned_to: data.user.id,
-        pending_assignment: false,
-        updated_at: new Date().toISOString(),
-      };
-      await kv.set(`request:${request.id}`, updatedRequest);
-
-      // Log assignment
-      await kv.set(`audit_log:${Date.now()}:${data.user.id}`, {
-        action: "auto_assigned_request",
-        user_id: data.user.id,
-        request_id: request.id,
-        timestamp: new Date().toISOString(),
-        details: {
-          email,
-          request_title: request.title,
-          created_by: request.created_by,
-        },
-      });
-    }
-
-    // Clean up OTP
-    await kv.del(`otp:${email}`);
-
-    // Send welcome email
-    try {
-      const result = await triggerWelcomeEmail({
-        id: data.user.id,
-        email,
-        name,
-        role: userRole,
-      });
-
-      if (!result.success) {
-        console.error("Failed to send welcome email:", result.error);
-      }
-    } catch (emailError) {
-      console.error("Error sending welcome email:", emailError);
-    }
-
-    return c.json({
-      success: true,
-      user: { id: data.user.id, email, name, role: userRole },
-    });
-  } catch (error) {
-    console.error("OTP verification/signup error:", error);
-    return c.json({ error: "Internal server error while verifying OTP/signup" }, 500);
-  }
-});
-
 // Get emails for debugging (managers/auditors only)
 app.get("/make-server-fcebfd37/emails", async (c) => {
   try {
-    const { user, error } = await authenticateUser(c.req.header("Authorization"));
-    
+    const { user, error } = await authenticateUser(
+      c.req.header("Authorization")
+    );
+
     if (!user?.id || error) {
       return c.json({ error: "Unauthorized" }, 401);
     }
@@ -1021,13 +1219,18 @@ app.get("/make-server-fcebfd37/emails", async (c) => {
 
     const emails: EmailRecord[] = await kv.getByPrefix("email:");
     const sortedEmails = emails
-      .sort((a, b) => new Date(b.sent_at).getTime() - new Date(a.sent_at).getTime())
+      .sort(
+        (a, b) => new Date(b.sent_at).getTime() - new Date(a.sent_at).getTime()
+      )
       .slice(0, 50); // limit to 50 most recent
 
     return c.json({ emails: sortedEmails });
   } catch (error) {
     console.error("Email fetch error:", error);
-    return c.json({ error: "Internal server error while fetching emails" }, 500);
+    return c.json(
+      { error: "Internal server error while fetching emails" },
+      500
+    );
   }
 });
 

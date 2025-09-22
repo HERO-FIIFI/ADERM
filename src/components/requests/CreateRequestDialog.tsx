@@ -30,22 +30,15 @@ export function CreateRequestDialog({ open, onOpenChange, accessToken, onRequest
 
   // Predefined department options
   const departments = [
-    'CCIB & FinTech',
-'Compliance',
-'Consumer & Commercial',
-'CX & Service Management',
-'Cyber Security',
-'Ecobank Business Services (EBS)',
-'Finance',
-'Human Resources (HR)',
-'Internal Audit',
-'Internal Control',
-'Legal',
-'MDs Office',
-'PMO',
-'Strategy and Execution',
-'Technology Infrastructure Engineering',
-'Technology Operations & Products',
+    'Finance',
+    'Human Resources',
+    'IT',
+    'Legal',
+    'Operations',
+    'Marketing',
+    'Sales',
+    'Procurement',
+    'Compliance',
     'Other'
   ];
 

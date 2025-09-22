@@ -26,9 +26,7 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
   const [pendingRequestsCount, setPendingRequestsCount] = useState(0);
 
   useEffect(() => {
-    if (prefilledEmail) {
-      setEmail(prefilledEmail);
-    }
+    if (prefilledEmail) setEmail(prefilledEmail);
   }, [prefilledEmail]);
 
   const handleSendOtp = async (e: React.FormEvent) => {
@@ -41,9 +39,7 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
       setLoading(false);
       return;
     }
-
-    // Validate @ecobank.com email domain
-    const ecobankEmailRegex = /^[^\s@]+@ecobank\.com$/;
+    const ecobankEmailRegex = /^[^\s@]+@ecobank\.com$/i;
     if (!ecobankEmailRegex.test(email)) {
       setError('Please use your Ecobank email address (@ecobank.com)');
       setLoading(false);
@@ -51,17 +47,20 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
     }
 
     try {
-      const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37/send-otp`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${publicAnonKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ email })
-      });
+      const response = await fetch(
+        `https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37/send-signup-otp`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${publicAnonKey}`,
+            'Content-Type': 'application/json',
+            origin: window.location.origin,
+          },
+          body: JSON.stringify({ email: email.trim().toLowerCase() }),
+        }
+      );
 
       const data = await response.json();
-
       if (response.ok) {
         setOtpSent(true);
         setStep('otp');
@@ -69,8 +68,8 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
       } else {
         setError(data.error || 'Failed to send OTP');
       }
-    } catch (error: any) {
-      console.error('Error sending OTP:', error);
+    } catch (err) {
+      console.error('Error sending OTP:', err);
       setError('Failed to send OTP. Please try again.');
     } finally {
       setLoading(false);
@@ -79,12 +78,10 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
 
   const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
-    
     if (otp.length !== 6) {
       setError('Please enter the complete 6-digit OTP');
       return;
     }
-
     setStep('profile');
   };
 
@@ -100,39 +97,43 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
     }
 
     try {
-      const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37/verify-otp-signup`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${publicAnonKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ 
-          email, 
-          otp, 
-          name: name.trim() 
-        })
-      });
+      const response = await fetch(
+        `https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37/verify-otp-signup`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${publicAnonKey}`,
+            'Content-Type': 'application/json',
+            origin: window.location.origin,
+          },
+          body: JSON.stringify({
+            email: email.trim().toLowerCase(),
+            otp: otp.trim(),
+            name: name.trim(),
+            role: 'auditee', // explicit; backend also defaults to auditee
+          }),
+        }
+      );
 
       const data = await response.json();
 
       if (response.ok) {
         setPendingRequestsCount(data.pending_requests_assigned || 0);
         toast.success('Account created successfully! Welcome to ADERM.');
-        
-        // Create a user object for the callback
+
         const userProfile = {
           id: data.user.id,
-          email: email,
+          email: email.trim().toLowerCase(),
           name: name.trim(),
-          role: 'auditee'
+          role: 'auditee',
         };
-        
+
         onSignupComplete(userProfile);
       } else {
         setError(data.error || 'Failed to verify OTP and create account');
       }
-    } catch (error: any) {
-      console.error('Error verifying OTP:', error);
+    } catch (err) {
+      console.error('Error verifying OTP:', err);
       setError('Failed to verify OTP. Please try again.');
     } finally {
       setLoading(false);
@@ -144,25 +145,28 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
     setError('');
 
     try {
-      const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37/send-otp`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${publicAnonKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ email })
-      });
+      const response = await fetch(
+        `https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37/send-signup-otp`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${publicAnonKey}`,
+            'Content-Type': 'application/json',
+            origin: window.location.origin,
+          },
+          body: JSON.stringify({ email: email.trim().toLowerCase() }),
+        }
+      );
 
       const data = await response.json();
-
       if (response.ok) {
         toast.success('New OTP sent to your email');
         setOtp('');
       } else {
         setError(data.error || 'Failed to resend OTP');
       }
-    } catch (error: any) {
-      console.error('Error resending OTP:', error);
+    } catch (err) {
+      console.error('Error resending OTP:', err);
       setError('Failed to resend OTP. Please try again.');
     } finally {
       setLoading(false);
@@ -190,8 +194,9 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
           {step === 'profile' && 'Complete your profile to finish registration'}
         </CardDescription>
       </CardHeader>
+
       <CardContent>
-        {/* Step 1: Email Input */}
+        {/* Step 1: Email */}
         {step === 'email' && (
           <form onSubmit={handleSendOtp} className="space-y-4">
             {error && (
@@ -199,7 +204,7 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
                 <AlertDescription>{error}</AlertDescription>
               </Alert>
             )}
-            
+
             <div className="space-y-2">
               <Label htmlFor="email">Work Email</Label>
               <Input
@@ -233,7 +238,7 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
           </form>
         )}
 
-        {/* Step 2: OTP Verification */}
+        {/* Step 2: OTP */}
         {step === 'otp' && (
           <form onSubmit={handleVerifyOtp} className="space-y-4">
             {error && (
@@ -247,15 +252,11 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
                 Verification code sent to:
                 <div className="font-medium text-gray-900">{email}</div>
               </div>
-              
+
               <div className="space-y-2">
                 <Label>Enter 6-digit code</Label>
                 <div className="flex justify-center">
-                  <InputOTP
-                    maxLength={6}
-                    value={otp}
-                    onChange={(value) => setOtp(value)}
-                  >
+                  <InputOTP maxLength={6} value={otp} onChange={(v: string) => setOtp(v)}>
                     <InputOTPGroup>
                       <InputOTPSlot index={0} />
                       <InputOTPSlot index={1} />
@@ -273,11 +274,10 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
               <Button type="submit" className="w-full" disabled={otp.length !== 6}>
                 Verify Code
               </Button>
-              
               <div className="text-center">
-                <Button 
-                  type="button" 
-                  variant="link" 
+                <Button
+                  type="button"
+                  variant="link"
                   onClick={handleResendOtp}
                   disabled={loading}
                   className="text-sm"
@@ -287,10 +287,10 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
               </div>
             </div>
 
-            <Button 
-              type="button" 
-              variant="outline" 
-              className="w-full" 
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
               onClick={() => setStep('email')}
             >
               Change Email Address
@@ -298,7 +298,7 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
           </form>
         )}
 
-        {/* Step 3: Profile Setup */}
+        {/* Step 3: Profile */}
         {step === 'profile' && (
           <form onSubmit={handleCompleteSignup} className="space-y-4">
             {error && (
@@ -307,10 +307,8 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
               </Alert>
             )}
 
-            <div className="text-center text-sm text-green-600 mb-4">
-              ✓ Email verified successfully
-            </div>
-            
+            <div className="text-center text-sm text-green-600 mb-4">✓ Email verified successfully</div>
+
             <div className="space-y-2">
               <Label htmlFor="name">Full Name</Label>
               <Input
@@ -327,7 +325,8 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
             <div className="bg-blue-50 p-3 rounded-lg text-sm">
               <div className="font-medium text-blue-900 mb-1">Account Details:</div>
               <div className="text-blue-700">
-                Email: {email}<br />
+                Email: {email}
+                <br />
                 Role: Auditee (Document Submitter)
               </div>
             </div>
@@ -335,16 +334,16 @@ export function AuditeeOtpSignup({ onSignupComplete, onBack, prefilledEmail }: A
             <Button type="submit" className="w-full" disabled={loading || !name.trim()}>
               {loading ? 'Creating Account...' : 'Complete Registration'}
             </Button>
-          </form>
-        )}
 
-        {pendingRequestsCount > 0 && step === 'profile' && (
-          <Alert className="mt-4">
-            <AlertDescription>
-              Great! You have {pendingRequestsCount} pending document request(s) waiting for you. 
-              You'll be able to access them once you complete the registration.
-            </AlertDescription>
-          </Alert>
+            {pendingRequestsCount > 0 && (
+              <Alert className="mt-4">
+                <AlertDescription>
+                  Great! You have {pendingRequestsCount} pending document request(s) waiting for you.
+                  You'll be able to access them once you complete the registration.
+                </AlertDescription>
+              </Alert>
+            )}
+          </form>
         )}
       </CardContent>
     </Card>

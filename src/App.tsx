@@ -31,7 +31,8 @@ export default function App() {
   
   // Check if this is a password reset flow
   const isPasswordReset = window.location.pathname === '/reset-password' || 
-                          window.location.hash.includes('type=recovery');
+                          window.location.hash.includes('type=recovery') ||
+                          window.location.search.includes('type=recovery');
 
   // Check URL parameters for auditee signup
   const urlParams = new URLSearchParams(window.location.search);

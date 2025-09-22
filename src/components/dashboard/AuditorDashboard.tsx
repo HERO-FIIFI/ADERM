@@ -8,6 +8,7 @@ import { CreateRequestDialog } from '../requests/CreateRequestDialog';
 import { RequestList } from '../requests/RequestList';
 import { AuditLogs } from '../audit/AuditLogs';
 import { DepartmentalAnalysis } from '../reports/DepartmentalAnalysis';
+import { EmailTestPanel } from '../debug/EmailTestPanel';
 import { projectId } from '../../utils/supabase/info';
 
 interface User {
@@ -206,6 +207,7 @@ export function AuditorDashboard({ user, accessToken }: AuditorDashboardProps) {
           <TabsTrigger value="requests">All Requests</TabsTrigger>
           <TabsTrigger value="analysis">Departmental Analysis</TabsTrigger>
           <TabsTrigger value="audit-logs">Audit Logs</TabsTrigger>
+          <TabsTrigger value="email-debug">Email System</TabsTrigger>
         </TabsList>
 
         <TabsContent value="requests">
@@ -227,6 +229,10 @@ export function AuditorDashboard({ user, accessToken }: AuditorDashboardProps) {
 
         <TabsContent value="audit-logs">
           <AuditLogs accessToken={accessToken} />
+        </TabsContent>
+
+        <TabsContent value="email-debug">
+          <EmailTestPanel accessToken={accessToken} />
         </TabsContent>
       </Tabs>
 
