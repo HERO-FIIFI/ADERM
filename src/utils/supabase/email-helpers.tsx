@@ -52,12 +52,11 @@ const getEnv = (key: string, defaultValue: string = ""): string => {
   return defaultValue;
 };
 
-const APP_URL = getEnv("NEXT_PUBLIC_APP_URL", typeof window !== 'undefined' ? window.location.origin : "");
+const APP_URL = getEnv("NEXT_PUBLIC_APP_URL", "https://your-production-domain.com");
 
 // Standardized error logging
 const logError = (context: string, error: unknown): void => {
-  const errorMessage = error instanceof Error ? error.message : "Unknown error";
-  console.error(`[Email] Error in ${context}:`, errorMessage);
+  // Silent error handling for production
 };
 
 // Updated sendEmailViaSupabase wrapper to return correct format
@@ -68,11 +67,7 @@ const sendEmailWrapper = async (
   cc?: string[]
 ): Promise<EmailResponse> => {
   try {
-    console.log(
-      `[DEBUG] sendEmailWrapper called with: to=${to}, subject=${subject}`
-    );
     const success = await sendEmailViaSupabase(to, subject, html, cc);
-    console.log(`[DEBUG] sendEmailViaSupabase returned: ${success}`);
 
     if (success) {
       return { success: true };
