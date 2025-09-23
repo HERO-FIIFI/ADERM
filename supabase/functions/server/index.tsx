@@ -1,8 +1,9 @@
 // index.tsx
-import { Hono } from "npm:hono";
-import { cors } from "npm:hono/cors";
+import { Hono, Context } from "npm:hono";
+import { cors } from "hono/cors";
 import { logger } from "npm:hono/logger";
 import { createClient } from "npm:@supabase/supabase-js";
+import { Resend } from "npm:resend@4.0.0";
 import * as kv from "./kv_store.tsx";
 
 // Fix: Use relative imports based on your file structure
@@ -12,7 +13,7 @@ import {
   triggerWelcomeEmail,
   triggerOTPEmail,
   sendEmailViaSupabase,
-} from "./email-helpers.tsx";
+} from "../../../src/utils/supabase/email-helpers.tsx";
 
 interface UserProfile {
   id: string;
@@ -89,6 +90,7 @@ interface SessionToken {
   login_method: string;
 }
 
+
 // Initialize Supabase client
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -101,15 +103,27 @@ const app = new Hono();
 // But you're using app.use() and app.post() throughout the file
 app.use("*", logger(console.log));
 
-// Enable CORS for all routes and methods
+// Enable CORS for all routes and methods - restricted origins for security
 app.use(
   "/*",
   cors({
-    origin: "*",
+    origin: [
+      "http://localhost:3000",
+      "http://localhost:3001",
+      "http://localhost:5173",
+      "https://localhost:3000",
+      "https://localhost:3001",
+      "https://localhost:5173",
+      // Allow Supabase domains for function-to-function communication
+      /^https:\/\/.*\.supabase\.co$/,
+      // Add your production domain here
+      // "https://your-production-domain.com"
+    ],
     allowHeaders: ["Content-Type", "Authorization"],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     exposeHeaders: ["Content-Length"],
     maxAge: 600,
+    credentials: true,
   })
 );
 
@@ -197,7 +211,7 @@ const getUserFromToken = async (authHeader: string | undefined) => {
 };
 
 // OTP generation and sending for login (existing users)
-app.post("/make-server-fcebfd37/send-otp", async (c) => {
+app.post("/send-otp", async (c: Context) => {
   try {
     const { email } = await c.req.json();
     if (!email) return c.json({ error: "Email is required" }, 400);
@@ -227,6 +241,11 @@ app.post("/make-server-fcebfd37/send-otp", async (c) => {
     // Generate & store login OTP (10 mins)
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const otpKey = `login_otp:${email.toLowerCase()}`;
+    console.log(`Generated verification code: ${otpKey}`);
+    logger.info(
+      `Generated verification code for email: ${email}, code: ${otpKey}`
+    );
+
     await kv.set(otpKey, {
       code: otp,
       email,
@@ -267,111 +286,69 @@ const authenticateUser = async (authHeader: string | undefined) => {
   return { user, error: !user?.id ? "Unauthorized" : null };
 };
 
-// OTP generation and sending for signup
-app.post("/make-server-fcebfd37/send-signup-otp", async (c) => {
-  try {
-    const { email } = await c.req.json();
-    if (!email) return c.json({ error: "Email is required" }, 400);
-
-    const okDomain = /^[^\s@]+@ecobank\.com$/i;
-    if (!okDomain.test(email)) {
-      return c.json(
-        { error: "Please use your Ecobank email address (@ecobank.com)" },
-        400
-      );
-    }
-
-    // Check if user already exists (signup is for new accounts)
-    const allUsers: UserProfile[] = await kv.getByPrefix("user:");
-    const existingUser = allUsers.find(
-      (u) => u.email.toLowerCase() === email.toLowerCase()
-    );
-    if (existingUser) {
-      return c.json(
-        {
-          error:
-            "An account with this email already exists. Please log in instead.",
-        },
-        400
-      );
-    }
-
-    // Generate & store signup OTP (10 mins)
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const otpKey = `otp:${email.toLowerCase()}`; // Note: different key format for signup
-    await kv.set(otpKey, {
-      code: otp,
-      email,
-      created_at: new Date().toISOString(),
-      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-      verified: false,
-    } satisfies OTPRecord);
-
-    // Build signup email
-    const subject = "ADERM: Your Signup Verification Code";
-    const html = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background:#fff;">
-        <div style="background:#1e40af;color:#fff;padding:20px;text-align:center;">
-          <h1 style="margin:0;font-size:24px;">🛡️ ADERM Platform</h1>
-          <p style="margin:5px 0 0;">Signup Verification Code</p>
-        </div>
-        <div style="padding:30px 20px;text-align:center;">
-          <p style="color:#374151;font-size:16px;">Welcome to ADERM!</p>
-          <p style="color:#374151;font-size:16px;">Use the code below to complete your registration.</p>
-          <div style="background:#f3f4f6;padding:30px 20px;border-radius:8px;margin:20px 0;">
-            <div style="font-size:32px;font-weight:bold;color:#1e40af;letter-spacing:8px;font-family:monospace;">${otp}</div>
-            <p style="color:#6b7280;font-size:14px;margin-top:15px;">This code expires in 10 minutes</p>
-          </div>
-          <div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:15px;margin:20px 0;text-align:left;">
-            <h4 style="color:#92400e;margin:0 0 10px;">⚠️ SECURITY NOTICE</h4>
-            <ul style="color:#92400e;margin:0;padding-left:20px;">
-              <li>Do not share this code with anyone</li>
-              <li>ADERM staff will never ask for this code</li>
-            </ul>
-          </div>
-        </div>
-        <div style="background:#f9fafb;padding:20px;text-align:center;border-top:1px solid #e5e7eb;">
-          <p style="color:#6b7280;font-size:12px;margin:0;">Sent: ${new Date().toLocaleString()}</p>
-        </div>
-      </div>`;
-
-    const ok = await sendEmailViaSupabase([email], subject, html);
-    if (!ok)
-      return c.json({ error: "Failed to send signup verification email" }, 500);
-
-    return c.json({
-      success: true,
-      message: "Signup verification code sent successfully",
-    });
-  } catch (e) {
-    console.error("Error sending signup OTP:", e);
-    return c.json({ error: "Internal server error" }, 500);
-  }
-});
-
-// OTP verification for login
-app.post("/make-server-fcebfd37/verify-login-otp", async (c) => {
+app.post("/verify-login-otp", async (c: Context) => {
   try {
     const { email, otp } = await c.req.json();
-    if (!email || !otp)
+
+    // DETAILED DEBUG LOGGING
+    console.log(`=== OTP VERIFICATION DEBUG ===`);
+    console.log(`Input email: "${email}"`);
+    console.log(`Input OTP: "${otp}" (type: ${typeof otp})`);
+
+    if (!email || !otp) {
+      console.log(`ERROR: Missing email or OTP`);
       return c.json({ error: "Email and OTP are required" }, 400);
+    }
 
     const otpKey = `login_otp:${email.toLowerCase()}`;
+    console.log(`Looking for key: "${otpKey}"`);
+
     const rec: OTPRecord | null = await kv.get(otpKey);
-    if (!rec) return c.json({ error: "Invalid or expired login code" }, 400);
+    console.log(`Found record:`, JSON.stringify(rec, null, 2));
+
+    if (!rec) {
+        console.error(`ERROR: No OTP record found for key: ${otpKey}`);
+      return c.json({ error: "Invalid or expired login code" }, 400);
+    }
+
+    console.log(`Stored OTP: "${rec.code}" (type: ${typeof rec.code})`);
+    console.log(`Input OTP: "${otp}" (type: ${typeof otp})`);
+    console.log(
+      `Direct comparison: ${rec.code} === ${otp} = ${rec.code === otp}`
+    );
+    console.log(
+      `String comparison: "${rec.code}" === "${otp}" = ${
+        String(rec.code) === String(otp)
+      }`
+    );
+    console.log(`Expires at: ${rec.expires_at}`);
+    console.log(`Current time: ${new Date().toISOString()}`);
+    console.log(`Is expired: ${new Date() > new Date(rec.expires_at)}`);
+    console.log(`Already verified: ${rec.verified}`);
 
     if (new Date() > new Date(rec.expires_at)) {
       await kv.del(otpKey);
+      console.log(`ERROR: OTP expired, deleted key`);
       return c.json(
         { error: "Login code has expired. Please request a new one." },
         400
       );
     }
-    if (rec.verified)
-      return c.json({ error: "Login code has already been used" }, 400);
-    if (rec.code !== otp) return c.json({ error: "Invalid login code" }, 400);
 
-    // Resolve user profile (prefer stored user_id; fallback by email)
+    if (rec.verified) {
+      console.log(`ERROR: OTP already used`);
+      return c.json({ error: "Login code has already been used" }, 400);
+    }
+
+    if (rec.code !== otp) {
+      console.log(
+        `ERROR: OTP mismatch - stored: "${rec.code}", input: "${otp}"`
+      );
+      return c.json({ error: "Invalid login code" }, 400);
+    }
+
+    console.log(`SUCCESS: OTP verification passed`);
+
     let userProfile: UserProfile | null = null;
     if (rec.user_id) userProfile = await kv.get(`user:${rec.user_id}`);
     if (!userProfile) {
@@ -414,23 +391,92 @@ app.post("/make-server-fcebfd37/verify-login-otp", async (c) => {
   }
 });
 
+// OTP generation and sending for signup
+app.post("/send-signup-otp", async (c) => {
+  try {
+    const { email } = await c.req.json();
+    if (!email) return c.json({ error: "Email is required" }, 400);
+
+    const okDomain = /^[^\s@]+@ecobank\.com$/i;
+    if (!okDomain.test(email)) {
+      return c.json(
+        { error: "Please use your Ecobank email address (@ecobank.com)" },
+        400
+      );
+    }
+
+    // Check if user already exists (signup is for new accounts)
+    const allUsers: UserProfile[] = await kv.getByPrefix("user:");
+    const existingUser = allUsers.find(
+      (u) => u.email.toLowerCase() === email.toLowerCase()
+    );
+    if (existingUser) {
+      return c.json(
+        {
+          error:
+            "An account with this email already exists. Please log in instead.",
+        },
+        400
+      );
+    }
+
+    // Generate & store signup OTP (10 mins)
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpKey = `signup_otp:${email.toLowerCase()}`; // Note: different key format for signup
+    console.log(`Generated verification code: ${otpKey}`);
+    logger.info(
+      `Generated verification code for email: ${email}, code: ${otp}`
+    );
+
+    await kv.set(otpKey, {
+      code: otp,
+      email,
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      verified: false,
+    } satisfies OTPRecord);
+
+    // Send OTP email using the email helper
+    const result = await triggerOTPEmail(
+      {
+        id: `temp_${Date.now()}`, // temporary ID for signup
+        email,
+        name: "New User",
+        role: "auditee", // default role for signup
+      },
+      otp,
+      "signup" // Specify this is for signup
+    );
+
+    if (!result.success) {
+      console.error("Failed to send signup OTP email");
+      return c.json({ error: "Failed to send verification email" }, 500);
+    }
+
+    return c.json({
+      success: true,
+      message: "SignUp OTP sent successfully",
+    });
+  } catch (e) {
+    console.error("Error sending login OTP:", e);
+    return c.json({ error: "Internal server error" }, 500);
+  }
+});
+
 // Verify OTP and complete signup
-app.post("/make-server-fcebfd37/verify-otp-signup", async (c) => {
+app.post("/verify-otp-signup", async (c) => {
   try {
     const { email, otp, name, role } = await c.req.json();
 
     if (!email || !otp || !name) {
       return c.json({ error: "Email, OTP, and name are required" }, 400);
     }
-
-    // Use role from request or default to auditee
     const userRole = role || "auditee";
 
     // Validate role
     if (!["auditor", "auditee", "manager"].includes(userRole)) {
       return c.json({ error: "Invalid role" }, 400);
     }
-
     // Validate @ecobank.com email domain
     const ecobankEmailRegex = /^[^\s@]+@ecobank\.com$/;
     if (!ecobankEmailRegex.test(email)) {
@@ -442,7 +488,7 @@ app.post("/make-server-fcebfd37/verify-otp-signup", async (c) => {
 
     // Check if user already exists
     const users: UserProfile[] = await kv.getByPrefix("user:");
-    const existingUser = users.find((user) => user.email === email);
+    const existingUser = users.find((user) => user.email.toLowerCase() === email.toLowerCase());
     if (existingUser) {
       return c.json(
         {
@@ -454,8 +500,10 @@ app.post("/make-server-fcebfd37/verify-otp-signup", async (c) => {
     }
 
     // Retrieve stored OTP
-    const otpKey = `otp:${email}`;
+    const otpKey = `signup_otp:${email.toLowerCase()}`;
     const storedOtpData: OTPRecord | null = await kv.get(otpKey);
+    console.log(`Looking for OTP with key: ${otpKey}`);
+    console.log(`Found OTP record:`, JSON.stringify(storedOtpData, null, 2));
 
     if (!storedOtpData) {
       return c.json({ error: "Invalid or expired OTP" }, 400);
@@ -670,7 +718,7 @@ app.post("/make-server-fcebfd37/requests", async (c) => {
 
     const requestId = `req_${Date.now()}_${Math.random()
       .toString(36)
-      .substr(2, 9)}`;
+      .slice(2, 11)}`;
     const request: Request = {
       id: requestId,
       title,
@@ -784,7 +832,7 @@ app.get("/make-server-fcebfd37/requests", async (c) => {
 });
 
 // Upload document for a request
-app.post("/make-server-fcebfd37/upload", async (c: import("hono").Context) => {
+app.post("/make-server-fcebfd37/upload", async (c: Context) => {
   try {
     const { user, error } = await authenticateUser(
       c.req.header("Authorization")
@@ -868,7 +916,7 @@ app.post("/make-server-fcebfd37/upload", async (c: import("hono").Context) => {
     // Store document metadata
     const documentId: string = `doc_${Date.now()}_${Math.random()
       .toString(36)
-      .substr(2, 9)}`;
+      .slice(2, 11)}`;
     const document: Document = {
       id: documentId,
       request_id: requestId,
@@ -1043,7 +1091,6 @@ app.put("/make-server-fcebfd37/requests/:requestId/status", async (c) => {
       },
     });
 
-
     const requestWithPreviousStatus = {
       ...updatedRequest,
       previousStatus: request.status, // Add the previous status
@@ -1170,7 +1217,7 @@ app.post("/make-server-fcebfd37/send-report", async (c) => {
     // Store metadata in KV (audit trail)
     const emailId = `email_${Date.now()}_${Math.random()
       .toString(36)
-      .substr(2, 9)}`;
+      .slice(2, 11)}`;
     await kv.set(`email:${emailId}`, {
       id: emailId,
       to,
@@ -1232,6 +1279,18 @@ app.get("/make-server-fcebfd37/emails", async (c) => {
       500
     );
   }
+});
+
+// Add this temporary debugging endpoint
+app.get("/make-server-fcebfd37/debug-otp/:email", async (c) => {
+  const email = c.req.param("email");
+  const otpKey = `login_otp:${email.toLowerCase()}`;
+
+  console.log(`Debug - Looking for key: ${otpKey}`);
+  const rec = await kv.get(otpKey);
+  console.log(`Debug - Found record:`, rec);
+
+  return c.json({ key: otpKey, record: rec });
 });
 
 // Start the server

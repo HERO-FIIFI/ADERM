@@ -210,7 +210,7 @@ export default function App() {
                 prefilledEmail={prefilledEmail}
               />
             ) : (
-              <Tabs value={authMode} onValueChange={(value) => setAuthMode(value as 'login' | 'signup')}>
+              <Tabs value={authMode} onValueChange={(value: string) => setAuthMode(value as 'login' | 'signup')}>
                 <TabsList className="grid w-full grid-cols-2">
                   <TabsTrigger value="login">Login</TabsTrigger>
                   <TabsTrigger value="signup">Sign Up</TabsTrigger>

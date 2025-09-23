@@ -119,15 +119,9 @@ export default function Login() {
         })
       );
 
-      // Role-based navigation
-      const role = String(user.role || '').toLowerCase();
-      if (role === 'auditee') {
-        window.location.href = '/auditee';
-      } else if (role === 'manager') {
-        window.location.href = '/manager';
-      } else {
-        window.location.href = '/dashboard';
-      }
+      // Reload the page to trigger the App component's authentication check
+      // This will properly render the appropriate dashboard based on user role
+      window.location.reload();
     } catch (e: any) {
       console.error('verify-login-otp error:', e);
       setErr('Failed to verify code.');

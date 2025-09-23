@@ -8,7 +8,7 @@ import {
   type RequestEmailData,
   type StatusChangeEmailData,
   type AuthEmailData,
-} from "./email";
+} from "./email.tsx";
 
 interface RequestData {
   id: string;
@@ -34,12 +34,25 @@ interface EmailResponse {
   error?: string;
 }
 
-// Helper to get environment variables for Deno
+// Helper to get environment variables - browser safe
 const getEnv = (key: string, defaultValue: string = ""): string => {
-  return Deno.env.get(key) || defaultValue;
+  // Check if we're in a Deno environment (server-side)
+  if (typeof globalThis !== 'undefined' && 'Deno' in globalThis) {
+    const deno = (globalThis as any).Deno;
+    return deno.env?.get(key) || defaultValue;
+  }
+  // Browser environment - use import.meta.env (Vite)
+  if (typeof import.meta !== 'undefined' && (import.meta as any).env) {
+    return (import.meta as any).env[key] || defaultValue;
+  }
+  // Fallback for other environments
+  if (typeof process !== 'undefined' && process.env) {
+    return process.env[key] || defaultValue;
+  }
+  return defaultValue;
 };
 
-const APP_URL = getEnv("NEXT_PUBLIC_APP_URL");
+const APP_URL = getEnv("NEXT_PUBLIC_APP_URL", typeof window !== 'undefined' ? window.location.origin : "");
 
 // Standardized error logging
 const logError = (context: string, error: unknown): void => {
