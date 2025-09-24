@@ -19,13 +19,14 @@ export default function Login() {
   const [resendCountdown, setResendCountdown] = useState(0); // seconds
 
   const baseUrl = useMemo(
-    () => `https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37`,
+    () => `https://zuwibzghvggscfqhfhnz.supabase.co/functions/v1/make-server-fcebfd37`,
     []
   );
 
   const ecobankRegex = /^[^\s@]+@ecobank\.com$/i;
 
   useEffect(() => {
+    console.log('Login component mounted');
     if (resendCountdown <= 0) return;
     const t = setInterval(() => setResendCountdown((s) => s - 1), 1000);
     return () => clearInterval(t);

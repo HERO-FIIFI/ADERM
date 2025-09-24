@@ -7,8 +7,8 @@ import { Alert, AlertDescription } from '../ui/alert';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 import { InputOTP, InputOTPGroup, InputOTPSlot } from '../ui/input-otp';
 import { UserPlus, Mail, Shield } from 'lucide-react';
-import { toast } from 'sonner@2.0.3';
-import { projectId, publicAnonKey } from '../../utils/supabase/info';
+import { toast } from 'sonner'; // Fixed: Remove version number
+import { publicAnonKey } from '../../utils/supabase/info';
 
 type Step = 'form' | 'otp';
 
@@ -27,25 +27,28 @@ export function Signup(_props: SignupProps) {
   const [err, setErr] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [otpSent, setOtpSent] = useState(false);
-  const [resendCountdown, setResendCountdown] = useState(0); // seconds
+  const [resendCountdown, setResendCountdown] = useState(0);
 
   const baseUrl = useMemo(
-    () => `https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37`,
+    () => `https://zuwibzghvggscfqhfhnz.supabase.co/functions/v1/make-server-fcebfd37`,
     []
   );
   const ecobankRegex = /^[^\s@]+@ecobank\.com$/i;
 
   useEffect(() => {
+    console.log('Signup component mounted');
+
     if (resendCountdown <= 0) return;
     const t = setInterval(() => setResendCountdown((s) => s - 1), 1000);
     return () => clearInterval(t);
   }, [resendCountdown]);
 
-  async function sendSignupOtp() {
+  async function sendSignupOtp(e?: React.FormEvent) {
+    if (e) e.preventDefault();
     setErr(null);
     setInfo(null);
 
-    const emailTrim = email.trim();
+    const emailTrim = email.trim().toLowerCase();
     const nameTrim = name.trim();
 
     if (!emailTrim || !nameTrim || !role) {
@@ -68,16 +71,21 @@ export function Signup(_props: SignupProps) {
           origin: window.location.origin,
         },
         // backend only needs email to send OTP
-        body: JSON.stringify({ email: emailTrim.toLowerCase() }),
+        body: JSON.stringify({ email: emailTrim }),
       });
 
       const data = await safeJson(resp);
 
       if (!resp.ok) {
-        setErr(data?.error || 'Failed to send verification code.');
+        if (resp.status === 409) {
+          setErr('An account with this email already exists. Please try logging in instead.');
+        } else {
+          setErr(data?.error || 'Failed to send verification code.');
+        }
         return;
       }
 
+      setEmail(emailTrim); // Update with normalized email
       setOtpSent(true);
       setStep('otp');
       setInfo(`We sent a 6-digit code to ${emailTrim}.`);
@@ -85,13 +93,14 @@ export function Signup(_props: SignupProps) {
       toast.success('OTP sent to your email.');
     } catch (e: any) {
       console.error('send-signup-otp error:', e);
-      setErr('Failed to send verification code.');
+      setErr('Network error. Please check your connection and try again.');
     } finally {
       setLoading(false);
     }
   }
 
-  async function verifyAndCreate() {
+  async function verifyAndCreate(e?: React.FormEvent) {
+    if (e) e.preventDefault();
     setErr(null);
     setInfo(null);
 
@@ -132,18 +141,26 @@ export function Signup(_props: SignupProps) {
       const data = await safeJson(resp);
 
       if (!resp.ok) {
-        setErr(data?.error || 'Failed to verify OTP and create account.');
+        if (resp.status === 400) {
+          setErr('Invalid or expired code. Please try again.');
+        } else if (resp.status === 409) {
+          setErr('Account already exists. Please try logging in.');
+        } else {
+          setErr(data?.error || 'Failed to verify OTP and create account.');
+        }
         return;
       }
 
       toast.success('Account created successfully! You can log in now.');
-      // You can route by role if desired:
-      // if (role === 'auditee') window.location.href = '/auditee';
-      // else window.location.href = '/login';
-      window.location.href = '/login';
+      
+      // Add small delay before redirect
+      setTimeout(() => {
+        window.location.href = '/login';
+      }, 1000);
+      
     } catch (e: any) {
       console.error('verify-otp-signup error:', e);
-      setErr('Failed to verify code.');
+      setErr('Network error. Please check your connection and try again.');
     } finally {
       setLoading(false);
     }
@@ -154,6 +171,12 @@ export function Signup(_props: SignupProps) {
     // just call sendSignupOtp again; keep name/role as-is
     await sendSignupOtp();
   }
+
+  const handleKeyPress = (e: React.KeyboardEvent, action: () => void) => {
+    if (e.key === 'Enter' && !loading) {
+      action();
+    }
+  };
 
   return (
     <Card className="w-full max-w-md mx-auto">
@@ -176,7 +199,7 @@ export function Signup(_props: SignupProps) {
         )}
 
         {step === 'form' && (
-          <div className="space-y-4">
+          <form onSubmit={sendSignupOtp} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="email">Work Email</Label>
               <Input
@@ -184,6 +207,7 @@ export function Signup(_props: SignupProps) {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                onKeyPress={(e) => handleKeyPress(e, () => sendSignupOtp())}
                 placeholder="your.email@ecobank.com"
                 autoComplete="email"
                 disabled={loading || otpSent}
@@ -198,6 +222,7 @@ export function Signup(_props: SignupProps) {
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
+                onKeyPress={(e) => handleKeyPress(e, () => sendSignupOtp())}
                 placeholder="Your full name"
                 autoComplete="name"
                 disabled={loading || otpSent}
@@ -219,15 +244,19 @@ export function Signup(_props: SignupProps) {
               </Select>
             </div>
 
-            <Button onClick={sendSignupOtp} disabled={loading} className="w-full">
+            <Button 
+              type="submit" 
+              disabled={loading || !email.trim() || !name.trim() || !role} 
+              className="w-full"
+            >
               <Mail className="h-4 w-4 mr-2" />
               {loading ? 'Sending…' : 'Send verification code'}
             </Button>
 
             <p className="text-xs text-gray-500 text-center">
-              We’ll email a 6-digit code to verify your address.
+              We'll email a 6-digit code to verify your address.
             </p>
-          </div>
+          </form>
         )}
 
         {step === 'otp' && (
@@ -236,31 +265,38 @@ export function Signup(_props: SignupProps) {
               Verification code sent to: <span className="font-medium">{email}</span>
             </div>
 
-            <div className="space-y-2">
-              <Label>Enter 6-digit code</Label>
-              <div className="flex justify-center">
-                <InputOTP maxLength={6} value={otp} onChange={(v: string) => setOtp(v)}>
-                  <InputOTPGroup>
-                    <InputOTPSlot index={0} />
-                    <InputOTPSlot index={1} />
-                    <InputOTPSlot index={2} />
-                    <InputOTPSlot index={3} />
-                    <InputOTPSlot index={4} />
-                    <InputOTPSlot index={5} />
-                  </InputOTPGroup>
-                </InputOTP>
+            <form onSubmit={verifyAndCreate} className="space-y-4">
+              <div className="space-y-2">
+                <Label>Enter 6-digit code</Label>
+                <div className="flex justify-center">
+                  <InputOTP 
+                    maxLength={6} 
+                    value={otp} 
+                    onChange={(v: string) => setOtp(v)}
+                    onKeyPress={(e) => handleKeyPress(e, () => verifyAndCreate())}
+                  >
+                    <InputOTPGroup>
+                      <InputOTPSlot index={0} />
+                      <InputOTPSlot index={1} />
+                      <InputOTPSlot index={2} />
+                      <InputOTPSlot index={3} />
+                      <InputOTPSlot index={4} />
+                      <InputOTPSlot index={5} />
+                    </InputOTPGroup>
+                  </InputOTP>
+                </div>
+                <p className="text-xs text-gray-500 text-center">Code expires in 10 minutes.</p>
               </div>
-              <p className="text-xs text-gray-500 text-center">Code expires in 10 minutes.</p>
-            </div>
 
-            <Button
-              onClick={verifyAndCreate}
-              disabled={loading || otp.length !== 6 || !name.trim() || !role}
-              className="w-full"
-            >
-              <Shield className="h-4 w-4 mr-2" />
-              {loading ? 'Verifying…' : 'Verify & Create Account'}
-            </Button>
+              <Button
+                type="submit"
+                disabled={loading || otp.length !== 6 || !name.trim() || !role}
+                className="w-full"
+              >
+                <Shield className="h-4 w-4 mr-2" />
+                {loading ? 'Verifying…' : 'Verify & Create Account'}
+              </Button>
+            </form>
 
             <div className="flex items-center justify-between text-sm text-gray-600">
               <button
@@ -285,6 +321,7 @@ export function Signup(_props: SignupProps) {
                 setInfo(null);
                 setErr(null);
               }}
+              disabled={loading}
             >
               Change details
             </Button>
@@ -298,8 +335,11 @@ export function Signup(_props: SignupProps) {
 /** Safely parse JSON response */
 async function safeJson(resp: Response) {
   try {
-    return await resp.json();
-  } catch {
+    const text = await resp.text();
+    if (!text) return null;
+    return JSON.parse(text);
+  } catch (error) {
+    console.error('Failed to parse JSON:', error);
     return null;
   }
 }

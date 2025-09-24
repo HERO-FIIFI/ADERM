@@ -2,3 +2,4 @@
 
 export const projectId = "zuwibzghvggscfqhfhnz"
 export const publicAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp1d2liemdodmdnc2NmcWhmaG56Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc1MTAyOTAsImV4cCI6MjA3MzA4NjI5MH0.msoVIRGTTR0i60KEKhs7N4kkeWGs9WkBsc46vWWzl30"
+export const RESEND_API_KEY= "re_FH2VSkxN_LVeKfqW8iCERLsf5aFU9XLy9"

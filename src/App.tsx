@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from './utils/supabase/client';
 import { projectId, publicAnonKey } from './utils/supabase/info';
-import  Login from './components/auth/Login';
+import Login from './components/auth/Login';
 import { Signup } from './components/auth/Signup';
-import { AuditeeOtpSignup } from './components/auth/AuditeeOtpSignup';
+
 import { AuditorDashboard } from './components/dashboard/AuditorDashboard';
 import { AuditeeDashboard } from './components/dashboard/AuditeeDashboard';
 import { ManagerDashboard } from './components/dashboard/ManagerDashboard';
@@ -24,21 +24,7 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [authMode, setAuthMode] = useState<'login' | 'signup' | 'auditee-signup'>('login');
-  
-
-
-  // Check URL parameters for auditee signup
-  const urlParams = new URLSearchParams(window.location.search);
-  const urlMode = urlParams.get('mode');
-  const prefilledEmail = urlParams.get('email') || '';
-
-  // Set initial auth mode based on URL
-  useEffect(() => {
-    if (urlMode === 'auditee-signup') {
-      setAuthMode('auditee-signup');
-    }
-  }, [urlMode]);
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
 
   useEffect(() => {
     checkUser();
@@ -49,28 +35,35 @@ export default function App() {
       // Check for custom OTP session first
       const storedSession = localStorage.getItem('aderm_session');
       if (storedSession) {
-        const sessionData = JSON.parse(storedSession);
-        const { token, user: storedUser, issued_at } = sessionData;
-        
-        // Check if session is still valid (e.g., 1 hour expiry)
-        const sessionAge = Date.now() - issued_at;
-        const SESSION_DURATION = 60 * 60 * 1000; // 1 hour
-        
-        if (sessionAge < SESSION_DURATION) {
-          // Try to fetch fresh profile with stored token
-          const success = await fetchUserProfile(token);
-          if (success) {
-            return; // Successfully loaded user from custom session
+        try {
+          const sessionData = JSON.parse(storedSession);
+          const { token, user: storedUser, issued_at, expires_at } = sessionData;
+          
+          // Check if session is still valid
+          const now = Date.now();
+          const hasExpired = expires_at && now > expires_at;
+          
+          if (!hasExpired && token) {
+            // Try to fetch fresh profile with stored token
+            const success = await fetchUserProfile(token);
+            if (success) {
+              return; // Successfully loaded user from custom session
+            }
           }
-        } else {
-          // Session expired, remove it
+          
+          // Session expired or invalid, remove it
+          localStorage.removeItem('aderm_session');
+        } catch (parseError) {
+          console.error('Error parsing stored session:', parseError);
           localStorage.removeItem('aderm_session');
         }
       }
 
       // Fallback to Supabase auth (for backward compatibility)
       const { data: { session }, error } = await supabase.auth.getSession();
-      if (session?.access_token) {
+      if (error) {
+        console.error('Supabase auth error:', error);
+      } else if (session?.access_token) {
         await fetchUserProfile(session.access_token);
       }
     } catch (error) {
@@ -83,26 +76,28 @@ export default function App() {
 
   const fetchUserProfile = async (token: string): Promise<boolean> => {
     try {
-      const response = await fetch(`https://${projectId}.supabase.co/functions/v1/make-server-fcebfd37/profile`, {
+      const response = await fetch(`https://zuwibzghvggscfqhfhnz.supabase.co/functions/v1/make-server-fcebfd37`, {
         headers: {
           'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'origin': window.location.origin
         }
       });
 
       if (response.ok) {
         const data = await response.json();
-        setUser(data.user);
-        setAccessToken(token);
-        return true;
-      } else {
-        console.error('Failed to fetch user profile');
-        setUser(null);
-        setAccessToken(null);
-        // Clean up invalid session
-        localStorage.removeItem('aderm_session');
-        return false;
+        if (data.user) {
+          setUser(data.user);
+          setAccessToken(token);
+          return true;
+        }
       }
+      
+      console.error('Failed to fetch user profile:', response.status, response.statusText);
+      setUser(null);
+      setAccessToken(null);
+      localStorage.removeItem('aderm_session');
+      return false;
     } catch (error) {
       console.error('Error fetching user profile:', error);
       setUser(null);
@@ -112,32 +107,20 @@ export default function App() {
     }
   };
 
-  const handleAuditeeSignupComplete = async (userProfile: User) => {
-    // Clear URL parameters
-    window.history.replaceState({}, document.title, window.location.pathname);
-    
-    // For OTP signup, the user should already be logged in via the OTP session
-    // Just check if we have a valid session
-    const storedSession = localStorage.getItem('aderm_session');
-    if (storedSession) {
-      const sessionData = JSON.parse(storedSession);
-      setUser(userProfile);
-      setAccessToken(sessionData.token);
-    } else {
-      console.error('No session after OTP signup');
+  const handleLogout = async () => {
+    try {
+      // Clear custom session
+      localStorage.removeItem('aderm_session');
+      
+      // Also clear Supabase auth (if any)
+      await supabase.auth.signOut();
+    } catch (error) {
+      console.error('Error during logout:', error);
+    } finally {
+      setUser(null);
+      setAccessToken(null);
       setAuthMode('login');
     }
-  };
-
-  const handleLogout = async () => {
-    // Clear custom session
-    localStorage.removeItem('aderm_session');
-    
-    // Also clear Supabase auth (if any)
-    await supabase.auth.signOut();
-    
-    setUser(null);
-    setAccessToken(null);
   };
 
   if (loading) {
@@ -151,13 +134,11 @@ export default function App() {
     );
   }
 
-  
-
   if (!user) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
-        <div className="w-full max-w-4xl">
-          <div className="text-center mb-8">
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
+        <div className="w-full max-w-4xl mx-auto">
+          <div className="text-center mb-6">
             <div className="flex items-center justify-center mb-4">
               <Shield className="h-12 w-12 text-blue-600 mr-2" />
               <h1 className="text-4xl font-bold text-gray-900">ADERM</h1>
@@ -166,7 +147,7 @@ export default function App() {
             <p className="text-gray-500">Secure, compliant, and efficient audit document management</p>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-8 mb-8">
+          <div className="grid md:grid-cols-2 gap-6 mb-6">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center">
@@ -203,38 +184,18 @@ export default function App() {
           </div>
 
           <div className="max-w-md mx-auto">
-            {authMode === 'auditee-signup' ? (
-              <AuditeeOtpSignup 
-                onSignupComplete={handleAuditeeSignupComplete}
-                onBack={() => setAuthMode('login')}
-                prefilledEmail={prefilledEmail}
-              />
-            ) : (
-              <Tabs value={authMode} onValueChange={(value: string) => setAuthMode(value as 'login' | 'signup')}>
-                <TabsList className="grid w-full grid-cols-2">
-                  <TabsTrigger value="login">Login</TabsTrigger>
-                  <TabsTrigger value="signup">Sign Up</TabsTrigger>
-                </TabsList>
-                <TabsContent value="login">
-                  <Login />
-                </TabsContent>
-                <TabsContent value="signup">
-                  <Signup />
-                </TabsContent>
-              </Tabs>
-            )}
-            
-            {authMode !== 'auditee-signup' && (
-              <div className="text-center mt-4">
-                <Button 
-                  variant="link" 
-                  onClick={() => setAuthMode('auditee-signup')}
-                  className="text-sm text-blue-600 hover:text-blue-800"
-                >
-                  New auditee? Register with email verification →
-                </Button>
-              </div>
-            )}
+            <Tabs value={authMode} onValueChange={(value: string) => setAuthMode(value as 'login' | 'signup')}>
+              <TabsList className="grid w-full grid-cols-2">
+                <TabsTrigger value="login">Login</TabsTrigger>
+                <TabsTrigger value="signup">Sign Up</TabsTrigger>
+              </TabsList>
+              <TabsContent value="login">
+                <Login />
+              </TabsContent>
+              <TabsContent value="signup">
+                <Signup />
+              </TabsContent>
+            </Tabs>
           </div>
         </div>
         <Toaster />
@@ -243,15 +204,19 @@ export default function App() {
   }
 
   const renderDashboard = () => {
+    if (!accessToken) {
+      return <div>Error: No access token available</div>;
+    }
+
     switch (user.role) {
       case 'auditor':
-        return <AuditorDashboard user={user} accessToken={accessToken!} />;
+        return <AuditorDashboard user={user} accessToken={accessToken} />;
       case 'auditee':
-        return <AuditeeDashboard user={user} accessToken={accessToken!} />;
+        return <AuditeeDashboard user={user} accessToken={accessToken} />;
       case 'manager':
-        return <ManagerDashboard user={user} accessToken={accessToken!} />;
+        return <ManagerDashboard user={user} accessToken={accessToken} />;
       default:
-        return <div>Invalid user role</div>;
+        return <div>Invalid user role: {user.role}</div>;
     }
   };
 

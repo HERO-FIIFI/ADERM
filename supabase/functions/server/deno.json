@@ -1,0 +1,13 @@
+{
+  "nodeModulesDir": "auto",
+  "compilerOptions": {
+    "lib": ["deno.ns", "deno.window"]
+  },
+  "imports": {
+    "hono": "npm:hono@^4.0.0",
+    "hono/cors": "npm:hono@^4.0.0/cors",
+    "hono/logger": "npm:hono@^4.0.0/logger",
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@^2.0.0",
+    "resend": "npm:resend@^4.0.0"
+  }
+}

@@ -1,4 +1,3 @@
-// email-helpers.tsx - FIXED VERSION
 import {
   sendNewRequestEmail,
   sendStatusChangeEmail,
@@ -8,7 +7,7 @@ import {
   type RequestEmailData,
   type StatusChangeEmailData,
   type AuthEmailData,
-} from "./email.tsx";
+} from "./email";
 
 interface RequestData {
   id: string;
@@ -52,7 +51,7 @@ const getEnv = (key: string, defaultValue: string = ""): string => {
   return defaultValue;
 };
 
-const APP_URL = getEnv("NEXT_PUBLIC_APP_URL", "https://your-production-domain.com");
+const APP_URL = getEnv("NEXT_PUBLIC_APP_URL", "http://localhost:3000");
 
 // Standardized error logging
 const logError = (context: string, error: unknown): void => {
