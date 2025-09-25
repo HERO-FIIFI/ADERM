@@ -806,7 +806,7 @@ app.post("/make-server-fcebfd37/requests", async (c:any) => {
     const users = await kv.getByPrefix("user:");
     const assignedUser = users.find((u) => u.email === assigned_to_email);
     // Allow creating requests for users who haven't signed up yet
-    let assignedUserId = null;
+    let assignedUserId =  [];
     if (assignedUser) {
       assignedUserId = assignedUser.id;
     }
@@ -854,7 +854,7 @@ app.post("/make-server-fcebfd37/requests", async (c:any) => {
           role: "auditee",
         },
         userProfile,
-        null
+         []
       );
       if (!result.success) {
         console.error("Failed to send new request email:", result.error);
@@ -937,6 +937,9 @@ app.get("/make-server-fcebfd37/requests", async (c:any) => {
     );
   }
 });
+
+
+
 // Upload document for a request
 app.post("/make-server-fcebfd37/upload", async (c:any) => {
   try {
@@ -997,11 +1000,9 @@ app.post("/make-server-fcebfd37/upload", async (c:any) => {
         ...request,
         assigned_to: user.id,
         pending_assignment: false,
-        // Remove the undefined newStatus line!
         updated_at: new Date().toISOString(),
       };
       await kv.set(`request:${requestId}`, updatedRequest);
-      // Log automatic assignment during upload
       await kv.set(`audit_log:${Date.now()}:${user.id}`, {
         action: "auto_assigned_on_upload",
         user_id: user.id,
@@ -1079,6 +1080,8 @@ app.post("/make-server-fcebfd37/upload", async (c:any) => {
     );
   }
 });
+
+
 // Get documents for a request
 app.get("/make-server-fcebfd37/requests/:requestId/documents", async (c:any) => {
   try {
@@ -1157,6 +1160,7 @@ app.get("/make-server-fcebfd37/requests/:requestId/documents", async (c:any) => 
     );
   }
 });
+
 // Update request status
 app.put("/make-server-fcebfd37/requests/:requestId/status", async (c:any) => {
   try {
@@ -1215,6 +1219,7 @@ app.put("/make-server-fcebfd37/requests/:requestId/status", async (c:any) => {
         403
       );
     }
+
     // Update request in KV
     const updatedRequest = {
       ...request,
@@ -1222,6 +1227,7 @@ app.put("/make-server-fcebfd37/requests/:requestId/status", async (c:any) => {
       updated_at: new Date().toISOString(),
     };
     await kv.set(`request:${requestId}`, updatedRequest);
+
     // Log status update
     await kv.set(`audit_log:${Date.now()}:${user.id}`, {
       action: "status_updated",
@@ -1234,10 +1240,146 @@ app.put("/make-server-fcebfd37/requests/:requestId/status", async (c:any) => {
         hr_confidential: request.department === "Human Resources",
       },
     });
+
+    // **NEW**: Upload documents to SharePoint if status is "Approved"
+    if (status.toLowerCase() === "approved") {
+      console.log(`Status changed to Approved for request ${requestId}, uploading documents to SharePoint`);
+      
+      try {
+        // Get all documents for this request
+        const allDocuments = await kv.getByPrefix("document:");
+        const requestDocuments = allDocuments.filter(
+          (doc) => doc.request_id === requestId
+        );
+
+        console.log(`Found ${requestDocuments.length} documents for request ${requestId}`);
+
+        // Upload each document to SharePoint via Power Automate
+        const sharepointResults = [];
+        
+        for (const document of requestDocuments) {
+          try {
+            console.log(`Processing document: ${document.filename}`);
+            
+            // Download file from Supabase Storage
+            const { data: fileData, error: downloadError } = await supabase.storage
+              .from(bucketName)
+              .download(document.file_path);
+
+            if (downloadError) {
+              console.error(`Failed to download file ${document.filename}:`, downloadError);
+              sharepointResults.push({
+                filename: document.filename,
+                success: false,
+                error: downloadError.message
+              });
+              continue;
+            }
+
+            // Convert to base64
+            const arrayBuffer = await fileData.arrayBuffer();
+            const base64Content = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+
+            console.log(`Uploading ${document.filename} to SharePoint (${base64Content.length} chars)`);
+
+            // Call SharePoint proxy function
+            const sharepointResponse = await fetch('https://zuwibzghvggscfqhfhnz.supabase.co/functions/v1/sharepoint-proxy', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+              },
+              body: JSON.stringify({
+                fileName: document.filename,
+                fileContentBase64: base64Content,
+                requestId: requestId,
+                department: request.department,
+                auditeeEmail: request.assigned_to_email
+              }),
+            });
+
+            if (sharepointResponse.ok) {
+              const result = await sharepointResponse.json();
+              console.log(`Successfully uploaded ${document.filename} to SharePoint`);
+              sharepointResults.push({
+                filename: document.filename,
+                success: true,
+                data: result
+              });
+
+              // Log successful SharePoint upload
+              await kv.set(`audit_log:${Date.now()}:${user.id}`, {
+                action: "document_uploaded_sharepoint",
+                user_id: user.id,
+                request_id: requestId,
+                document_id: document.id,
+                timestamp: new Date().toISOString(),
+                details: {
+                  filename: document.filename,
+                  department: request.department,
+                  status_trigger: "approved"
+                },
+              });
+
+            } else {
+              const errorText = await sharepointResponse.text();
+              console.error(`Failed to upload ${document.filename} to SharePoint:`, errorText);
+              sharepointResults.push({
+                filename: document.filename,
+                success: false,
+                error: `SharePoint upload failed: ${errorText}`
+              });
+            }
+
+          } catch (docError) {
+            console.error(`Error processing document ${document.filename}:`, docError);
+            sharepointResults.push({
+              filename: document.filename,
+              success: false,
+              error: docError instanceof Error ? docError.message : String(docError)
+            });
+          }
+        }
+
+        // Log overall SharePoint upload summary
+        const successCount = sharepointResults.filter(r => r.success).length;
+        const failCount = sharepointResults.filter(r => !r.success).length;
+        
+        console.log(`SharePoint upload summary: ${successCount} successful, ${failCount} failed`);
+
+        await kv.set(`audit_log:${Date.now()}:${user.id}`, {
+          action: "sharepoint_upload_summary",
+          user_id: user.id,
+          request_id: requestId,
+          timestamp: new Date().toISOString(),
+          details: {
+            total_documents: requestDocuments.length,
+            successful_uploads: successCount,
+            failed_uploads: failCount,
+            results: sharepointResults
+          },
+        });
+
+      } catch (sharepointError) {
+        console.error('Error during SharePoint upload process:', sharepointError);
+        // Don't fail the status update if SharePoint upload fails
+        await kv.set(`audit_log:${Date.now()}:${user.id}`, {
+          action: "sharepoint_upload_error",
+          user_id: user.id,
+          request_id: requestId,
+          timestamp: new Date().toISOString(),
+          details: {
+            error: sharepointError instanceof Error ? sharepointError.message : String(sharepointError)
+          },
+        });
+      }
+    }
+
     const requestWithPreviousStatus = {
       ...updatedRequest,
       previousStatus: request.status,
     };
+
     // Trigger status change email
     try {
       // Get the actual auditee user data
@@ -1258,7 +1400,7 @@ app.put("/make-server-fcebfd37/requests/:requestId/status", async (c:any) => {
         requestWithPreviousStatus,
         auditeeUser,
         userProfile,
-        null
+         []
       );
       if (!result.success) {
         console.error("Failed to send status change email:", result.error);
@@ -1266,6 +1408,7 @@ app.put("/make-server-fcebfd37/requests/:requestId/status", async (c:any) => {
     } catch (emailError) {
       console.error("Error sending status change email:", emailError);
     }
+
     return c.json({
       request: updatedRequest,
       success: true,
@@ -1280,6 +1423,8 @@ app.put("/make-server-fcebfd37/requests/:requestId/status", async (c:any) => {
     );
   }
 });
+
+
 // Get audit logs
 app.get("/make-server-fcebfd37/audit-logs", async (c:any) => {
   try {
@@ -1321,6 +1466,8 @@ app.get("/make-server-fcebfd37/audit-logs", async (c:any) => {
     );
   }
 });
+
+
 // Send departmental analysis report via email
 app.post("/make-server-fcebfd37/send-report", async (c:any) => {
   try {
