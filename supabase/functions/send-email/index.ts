@@ -1,11 +1,9 @@
 // supabase/functions/send-email/index.ts
-// If using Deno, ensure you run with `deno run --allow-net --allow-env <file>` and the import below works.
-// If using Node.js, replace with an appropriate HTTP server (e.g., Express).
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 
-// For Deno, you can use Deno.env.get directly, but ensure you run with --allow-env flag.
-// If you are running in Supabase Edge Functions, use Deno.env.get as below:
 const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY')
+
+console.log('RESEND_API_KEY available:', !!RESEND_API_KEY)
 
 interface EmailRequest {
   to: string[]
@@ -20,16 +18,26 @@ const corsHeaders = {
 }
 
 serve(async (req: Request) => {
+  console.log('Email function called with method:', req.method)
+  
   // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
   }
 
   try {
-    const { to, cc, subject, html }: EmailRequest = await req.json()
+    const requestBody = await req.json()
+    console.log('Email request received:', { 
+      to: requestBody.to, 
+      subject: requestBody.subject,
+      hasHtml: !!requestBody.html 
+    })
+
+    const { to, cc, subject, html }: EmailRequest = requestBody
 
     // Validate required fields
     if (!to || !Array.isArray(to) || to.length === 0) {
+      console.error('Invalid recipients:', to)
       return new Response(
         JSON.stringify({ error: 'Recipients (to) are required and must be an array' }),
         { 
@@ -40,10 +48,22 @@ serve(async (req: Request) => {
     }
 
     if (!subject || !html) {
+      console.error('Missing subject or html:', { subject: !!subject, html: !!html })
       return new Response(
         JSON.stringify({ error: 'Subject and HTML content are required' }),
         { 
           status: 400, 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        }
+      )
+    }
+
+    if (!RESEND_API_KEY) {
+      console.error('RESEND_API_KEY not found in environment variables')
+      return new Response(
+        JSON.stringify({ error: 'Email service not configured' }),
+        { 
+          status: 500, 
           headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
         }
       )
@@ -62,6 +82,12 @@ serve(async (req: Request) => {
       emailPayload.cc = cc
     }
 
+    console.log('Sending email via Resend API:', {
+      from: emailPayload.from,
+      to: emailPayload.to,
+      subject: emailPayload.subject
+    })
+
     // Send email via Resend API
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -72,8 +98,11 @@ serve(async (req: Request) => {
       body: JSON.stringify(emailPayload),
     })
 
+    console.log('Resend API response status:', res.status)
+
     if (res.ok) {
       const data = await res.json()
+      console.log('Email sent successfully:', data)
       return new Response(
         JSON.stringify({ success: true, data }),
         { 
@@ -83,7 +112,7 @@ serve(async (req: Request) => {
       )
     } else {
       const error = await res.text()
-      console.error('Resend API error:', error)
+      console.error('Resend API error response:', error)
       return new Response(
         JSON.stringify({ error: 'Failed to send email', details: error }),
         { 
@@ -107,4 +136,3 @@ serve(async (req: Request) => {
     )
   }
 })
-

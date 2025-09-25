@@ -4,6 +4,7 @@ import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
 import { createClient } from "npm:@supabase/supabase-js";
 import * as kv from "./kv_store.tsx";
+
 // Fix: Use relative imports based on your file structure
 import {
   triggerNewRequestEmail,
@@ -37,7 +38,7 @@ const bucketName = "make-fcebfd37-audit-documents";
 const initializeStorage = async () => {
   try {
     const { data: buckets } = await supabase.storage.listBuckets();
-    const bucketExists = buckets?.some((bucket) => bucket.name === bucketName);
+    const bucketExists = buckets?.some((bucket : { name: string }) => bucket.name === bucketName);
     if (!bucketExists) {
       await supabase.storage.createBucket(bucketName, {
         public: false,
@@ -49,50 +50,115 @@ const initializeStorage = async () => {
   }
 };
 initializeStorage();
-// Helper function to get user from session token or auth token
-const getUserFromToken = async (authHeader) => {
+
+Deno.serve(async (req: Request) => {
+  const authHeader = req.headers.get('Authorization')
+  
   if (!authHeader) {
-    console.log("getUserFromToken - No auth header provided");
+    return new Response('Unauthorized', { status: 401 })
+  }
+  
+  const token = authHeader.replace('Bearer ', '')
+  
+  // Handle OTP session tokens
+  if (token.startsWith('otp_session_')) {
+    const isValid = await validateOTPSession(token)
+    if (!isValid) {
+      return new Response('Invalid session', { status: 401 })
+    }
+    
+    // Use service role key for database operations
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+    )
+    
+    // Your authenticated logic here
+    return new Response('Success', { status: 200 })
+  }
+  
+  // Handle regular JWT tokens if needed
+  const supabaseClient = createClient(
+    Deno.env.get('SUPABASE_URL') ?? '',
+    Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+    {
+      global: {
+        headers: { Authorization: authHeader }
+      }
+    }
+  )
+  
+  const { data: { user }, error } = await supabaseClient.auth.getUser(token)
+  if (error || !user) {
+    return new Response('Invalid JWT', { status: 401 })
+  }
+  
+  // Your authenticated logic here
+})
+
+async function validateOTPSession(token: string): Promise<boolean> {
+  const supabase = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  )
+  
+  const { data: session } = await supabase
+    .from('otp_sessions')
+    .select('*')
+    .eq('token', token)
+    .eq('verified', true)
+    .gt('expires_at', new Date().toISOString())
+    .single()
+    
+  return !!session
+}
+
+// Helper function to get user from session token or auth token
+const getUserFromToken = async (authHeader: string | undefined) => {
+  console.log("=== getUserFromToken DEBUG START ===");
+  if (!authHeader) {
+    console.log("ERROR: No auth header provided");
     return null;
   }
+  
   const token = authHeader.split(" ")[1];
-  console.log("getUserFromToken - Token:", token.substring(0, 20) + "...");
+  console.log("Token received:", token);
+  console.log("Token starts with otp_session_:", token.startsWith("otp_session_"));
+  
   // Check if it's an OTP session token
   if (token.startsWith("otp_session_")) {
-    console.log("getUserFromToken - OTP session token detected");
+    console.log("Processing OTP session token");
     try {
       const sessionData = await kv.get(token);
-      console.log("getUserFromToken - Session data:", sessionData);
+      console.log("Raw session data from KV:", JSON.stringify(sessionData, null, 2));
+      
       if (sessionData) {
         // Check if session is expired
         const expiresAt = new Date(sessionData.expires_at);
         const now = new Date();
-        console.log(
-          "getUserFromToken - Session expires:",
-          expiresAt,
-          "Current time:",
-          now
-        );
+        console.log("Session expires:", expiresAt);
+        console.log("Current time:", now);
+        console.log("Is expired:", now > expiresAt);
+        
         if (now > expiresAt) {
-          console.log("getUserFromToken - Session expired, deleting");
+          console.log("Session expired, deleting");
           await kv.del(token);
           return null;
         }
-        console.log(
-          "getUserFromToken - Returning user ID:",
-          sessionData.user_id
-        );
-        return {
-          id: sessionData.user_id,
-        };
+        
+        console.log("Session valid, returning user ID:", sessionData.user_id);
+        return { id: sessionData.user_id };
       }
-      console.log("getUserFromToken - No session data found");
+      console.log("No session data found in KV store");
       return null;
     } catch (error) {
-      console.error("Error getting session from KV store:", error);
+      console.error("KV store error:", error);
       return null;
     }
   }
+  console.log("Not an OTP session token, trying Supabase auth");
+  // ... rest of function
+
   // Otherwise, try to get user from Supabase auth token
   console.log("getUserFromToken - Using Supabase auth token");
   try {
@@ -113,7 +179,7 @@ const getUserFromToken = async (authHeader) => {
 
 // OTP generation and sending for login (existing users)
 // OTP generation and sending for login (existing users)
-app.post("/make-server-fcebfd37/send-otp", async (c) => {
+app.post("/make-server-fcebfd37/send-otp", async (c: any) => {
   try {
     console.log("=== LOGIN OTP DEBUG START ===");
     const { email } = await c.req.json();
@@ -207,8 +273,17 @@ app.post("/make-server-fcebfd37/send-otp", async (c) => {
 });
 
 
+// Helper function for authentication  
+const authenticateUser = async (authHeader: string) => {
+  const user = await getUserFromToken(authHeader);
+  return {
+    user,
+    error: !user?.id ? "Unauthorized" : null,
+  };
+};
+
 // Verify OTP for login
-app.post("/make-server-fcebfd37/verify-login-otp", async (c) => {
+app.post("/make-server-fcebfd37/verify-login-otp", async (c:any) => {
   try {
     const { email, otp } = await c.req.json();
     // DETAILED DEBUG LOGGING
@@ -334,8 +409,59 @@ app.post("/make-server-fcebfd37/verify-login-otp", async (c) => {
   }
 });
 
+
+// Get user profile
+app.get("/make-server-fcebfd37/profile", async (c:any) => {
+  try {
+    const authHeader = c.req.header("Authorization");
+    console.log("=== PROFILE REQUEST DEBUG ===");
+    console.log("Profile request - Auth header:", authHeader);
+    
+    if (!authHeader) {
+      console.log("ERROR: No Authorization header");
+      return c.json({ error: "No Authorization header" }, 401);
+    }
+
+    const token = authHeader.split(" ")[1];
+    console.log("Profile request - Token:", token.substring(0, 20) + "...");
+    
+    const user = await getUserFromToken(authHeader);
+    console.log("Profile request - User from token:", user);
+    
+    if (!user?.id) {
+      console.log("Profile request - No user ID found");
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+
+    const userProfile = await kv.get(`user:${user.id}`);
+    console.log("Profile request - User profile:", userProfile);
+    
+    if (!userProfile) {
+      console.log("Profile request - No user profile found for ID:", user.id);
+      return c.json({ error: "User profile not found" }, 404);
+    }
+
+    return c.json({ user: userProfile });
+  } catch (error) {
+    console.error("Error fetching profile:", error);
+    return c.json({ error: "Internal server error" }, 500);
+  }
+});
+
+app.get("/make-server-fcebfd37/debug-user/:userId", async (c:any) => {
+  const userId = c.req.param("userId");
+  const userKey = `user:${userId}`;
+  console.log(`Debug - Looking for user: ${userKey}`);
+  const userData = await kv.get(userKey);
+  console.log(`Debug - Found user:`, userData);
+  return c.json({ userKey, userData });
+});
+
+
+
+
 // OTP generation and sending for signup
-app.post("/make-server-fcebfd37/send-signup-otp", async (c) => {
+app.post("/make-server-fcebfd37/send-signup-otp", async (c:any) => {
   try {
     console.log("=== SIGNUP OTP DEBUG START ===");
     const { email } = await c.req.json();
@@ -426,7 +552,7 @@ app.post("/make-server-fcebfd37/send-signup-otp", async (c) => {
   }
 });
 // Verify OTP and complete signup
-app.post("/make-server-fcebfd37/verify-otp-signup", async (c) => {
+app.post("/make-server-fcebfd37/verify-otp-signup", async (c:any) => {
   try {
     const { email, otp, name, role } = await c.req.json();
     if (!email || !otp || !name) {
@@ -624,48 +750,11 @@ app.post("/make-server-fcebfd37/verify-otp-signup", async (c) => {
     );
   }
 });
-// Get user profile
-app.get("/make-server-fcebfd37/profile", async (c) => {
-  try {
-    const authHeader = c.req.header("Authorization");
-    console.log("Profile request - Auth header:", authHeader);
-    const user = await getUserFromToken(authHeader);
-    console.log("Profile request - User from token:", user);
-    if (!user?.id) {
-      console.log("Profile request - No user ID found");
-      return c.json(
-        {
-          error: "Unauthorized",
-        },
-        401
-      );
-    }
-    const userProfile = await kv.get(`user:${user.id}`);
-    console.log("Profile request - User profile:", userProfile);
-    if (!userProfile) {
-      console.log("Profile request - No user profile found for ID:", user.id);
-      return c.json(
-        {
-          error: "User profile not found",
-        },
-        404
-      );
-    }
-    return c.json({
-      user: userProfile,
-    });
-  } catch (error) {
-    console.error("Error fetching profile:", error);
-    return c.json(
-      {
-        error: "Internal server error",
-      },
-      500
-    );
-  }
-});
+
+
+
 // Create document request
-app.post("/make-server-fcebfd37/requests", async (c) => {
+app.post("/make-server-fcebfd37/requests", async (c:any) => {
   try {
     const { user, error } = await authenticateUser(
       c.req.header("Authorization")
@@ -788,7 +877,7 @@ app.post("/make-server-fcebfd37/requests", async (c) => {
   }
 });
 // Get requests (filtered by user role)
-app.get("/make-server-fcebfd37/requests", async (c) => {
+app.get("/make-server-fcebfd37/requests", async (c:any) => {
   try {
     const { user, error } = await authenticateUser(
       c.req.header("Authorization")
@@ -849,7 +938,7 @@ app.get("/make-server-fcebfd37/requests", async (c) => {
   }
 });
 // Upload document for a request
-app.post("/make-server-fcebfd37/upload", async (c) => {
+app.post("/make-server-fcebfd37/upload", async (c:any) => {
   try {
     const { user, error } = await authenticateUser(
       c.req.header("Authorization")
@@ -991,7 +1080,7 @@ app.post("/make-server-fcebfd37/upload", async (c) => {
   }
 });
 // Get documents for a request
-app.get("/make-server-fcebfd37/requests/:requestId/documents", async (c) => {
+app.get("/make-server-fcebfd37/requests/:requestId/documents", async (c:any) => {
   try {
     const { user, error } = await authenticateUser(
       c.req.header("Authorization")
@@ -1069,7 +1158,7 @@ app.get("/make-server-fcebfd37/requests/:requestId/documents", async (c) => {
   }
 });
 // Update request status
-app.put("/make-server-fcebfd37/requests/:requestId/status", async (c) => {
+app.put("/make-server-fcebfd37/requests/:requestId/status", async (c:any) => {
   try {
     const { user, error } = await authenticateUser(
       c.req.header("Authorization")
@@ -1192,7 +1281,7 @@ app.put("/make-server-fcebfd37/requests/:requestId/status", async (c) => {
   }
 });
 // Get audit logs
-app.get("/make-server-fcebfd37/audit-logs", async (c) => {
+app.get("/make-server-fcebfd37/audit-logs", async (c:any) => {
   try {
     const { user, error } = await authenticateUser(
       c.req.header("Authorization")
@@ -1233,7 +1322,7 @@ app.get("/make-server-fcebfd37/audit-logs", async (c) => {
   }
 });
 // Send departmental analysis report via email
-app.post("/make-server-fcebfd37/send-report", async (c) => {
+app.post("/make-server-fcebfd37/send-report", async (c:any) => {
   try {
     const { user, error } = await authenticateUser(
       c.req.header("Authorization")
@@ -1334,7 +1423,7 @@ app.post("/make-server-fcebfd37/send-report", async (c) => {
   }
 });
 // Get emails for debugging (managers/auditors only)
-app.get("/make-server-fcebfd37/emails", async (c) => {
+app.get("/make-server-fcebfd37/emails", async (c:any) => {
   try {
     const { user, error } = await authenticateUser(
       c.req.header("Authorization")
@@ -1375,8 +1464,18 @@ app.get("/make-server-fcebfd37/emails", async (c) => {
     );
   }
 });
+
+app.get("/make-server-fcebfd37/debug-session/:token", async (c:any) => {
+  const token = c.req.param("token");
+  console.log(`Debug - Looking for session: ${token}`);
+  const sessionData = await kv.get(token);
+  console.log(`Debug - Found session:`, sessionData);
+  return c.json({ token, sessionData });
+});
+
+
 // Add this temporary debugging endpoint
-app.get("/make-server-fcebfd37/debug-otp/:email", async (c) => {
+app.get("/make-server-fcebfd37/debug-otp/:email", async (c:any) => {
   const email = c.req.param("email");
   const otpKey = `login_otp:${email.toLowerCase()}`;
   console.log(`Debug - Looking for key: ${otpKey}`);

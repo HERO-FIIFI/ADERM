@@ -76,9 +76,10 @@ export default function App() {
 
   const fetchUserProfile = async (token: string): Promise<boolean> => {
     try {
-      const response = await fetch(`https://zuwibzghvggscfqhfhnz.supabase.co/functions/v1/make-server-fcebfd37`, {
+      const response = await fetch(`https://zuwibzghvggscfqhfhnz.supabase.co/functions/v1/make-server-fcebfd37/profile`, {
         headers: {
           'Authorization': `Bearer ${token}`,
+          // 'Authorization': `Bearer ${publicAnonKey}`,
           'Content-Type': 'application/json',
           'origin': window.location.origin
         }
